@@ -1,13 +1,14 @@
 import { Schema, Logger, segment, Context, h } from 'koishi'
 import axios from 'axios'
+import yaml from 'yaml'
 import fs from 'fs'
 import path from 'path'
-import { pipeline } from 'stream/promises'
-import yaml from 'yaml'
-import crypto from 'crypto'
 
 export const name = 'ai-image'
-export const inject = ['console', 'i18n']
+export const inject = {
+  required: ['console', 'i18n'],
+  optional: ['assets'],
+}
 
 const logger = new Logger('ai-image')
 
@@ -31,13 +32,22 @@ export const Config = Schema.object({
     baseUrl: Schema.string().description('接口地址，需符合 OpenAI 标准'),
   })).default([]).description('API 配置列表（支持多账号负载）'),
 
-  command: Schema.string().default('draw').description('文生图指令'),
-  aliases: Schema.array(String).default([]).description('文生图指令别名'),
-  img2imgCommand: Schema.string().default('imgdraw').description('图生图指令'),
-  img2imgAliases: Schema.array(String).default([]).description('图生图指令别名'),
-
   enableTxt2Img: Schema.boolean().default(true).description('启用文生图'),
   enableImg2Img: Schema.boolean().default(true).description('启用图生图'),
+
+  command: Schema.string()
+    .default('draw')
+    .description('文生图指令（仅在启用文生图时有效）'),
+  aliases: Schema.array(String)
+    .default([])
+    .description('文生图指令别名（仅在启用文生图时有效）'),
+
+  img2imgCommand: Schema.string()
+    .default('imgdraw')
+    .description('图生图指令（仅在启用图生图时有效）'),
+  img2imgAliases: Schema.array(String)
+    .default([])
+    .description('图生图指令别名（仅在启用图生图时有效）'),
 
   messages: Schema.object({
     generating: Schema.string().default('⏳ 生成中...').description('生成中提示'),
@@ -48,15 +58,15 @@ export const Config = Schema.object({
     noImg: Schema.string().default('❌ 生成失败').description('无图片返回提示'),
     success: Schema.string().default('✅ 生成成功').description('生成成功提示'),
     fail: Schema.string().default('❌ 生成失败').description('生成失败提示'),
+    needAssets: Schema.string().default('❌ 图生图需要正确配置 assets 服务的 selfUrl（当前链接非公网地址）').description('assets 返回非公网链接提示'),
   }).description('提示文案配置'),
 }).description('AI 绘图插件配置')
 
 export async function apply(ctx: Context, cfg: Infer<typeof Config>) {
   const debug = cfg.debug
-  const cacheDir = path.join(process.cwd(), 'aiimage_cache')
-  if (!fs.existsSync(cacheDir)) {
-    fs.mkdirSync(cacheDir, { recursive: true })
-  }
+
+  const TXT2IMG_PROMPT_PREFIX = '请严格遵循我的要求生成一张图片，不要询问或添加额外说明，直接输出图片。要求：'
+  const IMG2IMG_PROMPT_PREFIX = '请严格根据以下指令对提供的图片进行编辑或重绘，不要询问，直接输出结果：'
 
   try {
     const loc = path.join(__dirname, 'locales', 'zh-CN.yml')
@@ -67,6 +77,8 @@ export async function apply(ctx: Context, cfg: Infer<typeof Config>) {
 
   const waitingMap = new Map<string, { prompt: string; timer: NodeJS.Timeout }>()
   const idx = { val: 0 }
+
+  const assets = (ctx as any).assets
 
   function getApi() {
     const list = cfg.apiList.filter(v => v.enable && v.apiKey && v.baseUrl)
@@ -84,20 +96,7 @@ export async function apply(ctx: Context, cfg: Infer<typeof Config>) {
     return match ? match[0] : null
   }
 
-  async function downloadImage(url: string) {
-    const hashName = crypto.createHash('md5').update(`${Date.now()}${Math.random()}`).digest('hex') + '.jpg'
-    const filePath = path.join(cacheDir, hashName)
-    const res = await axios({ url, responseType: 'stream', timeout: 30000 })
-    await pipeline(res.data, fs.createWriteStream(filePath))
-    return filePath
-  }
-
-  function fileToBase64(filePath: string) {
-    const img = fs.readFileSync(filePath)
-    return `data:image/jpeg;base64,${img.toString('base64')}`
-  }
-
-  async function generateImage(session: any, prompt: string, imgPath = '') {
+  async function generate(session: any, prompt: string, imageUrl?: string) {
     const api = getApi()
     if (!api) {
       if (debug) logger.info('[DEBUG] 无可用API')
@@ -105,10 +104,12 @@ export async function apply(ctx: Context, cfg: Infer<typeof Config>) {
       return
     }
 
-    let content
-    if (imgPath) {
-      const base64 = fileToBase64(imgPath)
-      content = `请解析下方的图片BASE64编码，严格根据我的要求编辑、重绘这张图片：${prompt}\n${base64}`
+    let content: any
+    if (imageUrl) {
+      content = [
+        { type: 'text', text: prompt },
+        { type: 'image_url', image_url: { url: imageUrl } }
+      ]
     } else {
       content = prompt
     }
@@ -136,61 +137,84 @@ export async function apply(ctx: Context, cfg: Infer<typeof Config>) {
         await session.send(cfg.messages.fail)
       }
     } catch (err) {
-      if (debug) logger.error('[DEBUG] 请求失败', err)
+      logger.error('[ai-image] API请求失败', err)
       await session.send(cfg.messages.fail)
-    } finally {
-      if (imgPath && fs.existsSync(imgPath)) fs.unlinkSync(imgPath)
     }
   }
 
   const cmd = ctx.command(`${cfg.command} <raw:text>`)
   cfg.aliases.forEach(alias => cmd.alias(alias))
   cmd.action(async ({ session }, raw) => {
-    if (!session || !cfg.enableTxt2Img) return
-    const prompt = cleanHtmlTags(raw || '')
-    if (!prompt) return session.send(cfg.messages.empty)
-    await session.send(cfg.messages.generating)
-    await generateImage(session, prompt)
+    try {
+      if (!session || !cfg.enableTxt2Img) return
+      const prompt = cleanHtmlTags(raw || '')
+      if (!prompt) return session.send(cfg.messages.empty)
+      await session.send(cfg.messages.generating)
+      await generate(session, TXT2IMG_PROMPT_PREFIX + prompt)
+    } catch (e) {
+      logger.error('[ai-image] 文生图命令异常', e)
+      await session.send(cfg.messages.fail)
+    }
   })
 
   const imgCmd = ctx.command(`${cfg.img2imgCommand} <raw:text>`)
   cfg.img2imgAliases.forEach(alias => imgCmd.alias(alias))
   imgCmd.action(async ({ session }, raw) => {
-    if (!session || !cfg.enableImg2Img) return
-    const prompt = cleanHtmlTags(raw || '')
-    if (!prompt) return session.send(cfg.messages.empty)
+    try {
+      if (!session || !cfg.enableImg2Img) return
+      if (!assets) return session.send(cfg.messages.needAssets)
+      const prompt = cleanHtmlTags(raw || '')
+      if (!prompt) return session.send(cfg.messages.empty)
 
-    const key = `${session.guildId || 'private'}-${session.userId}`
-    if (waitingMap.has(key)) return
+      const key = `${session.guildId || 'private'}-${session.userId}`
+      if (waitingMap.has(key)) return
 
-    await session.send(cfg.messages.waitImage.replace('60', String(cfg.imgWaitTime)))
-    const timer = setTimeout(() => {
-      waitingMap.delete(key)
-      session.send(cfg.messages.timeout)
-    }, cfg.imgWaitTime * 1000)
-    waitingMap.set(key, { prompt, timer })
+      await session.send(cfg.messages.waitImage.replace('60', String(cfg.imgWaitTime)))
+      const timer = setTimeout(() => {
+        waitingMap.delete(key)
+        session.send(cfg.messages.timeout)
+      }, cfg.imgWaitTime * 1000)
+      waitingMap.set(key, { prompt, timer })
+    } catch (e) {
+      logger.error('[ai-image] 图生图命令异常', e)
+      await session.send(cfg.messages.fail)
+    }
   })
 
   ctx.on('message', async (session) => {
-    if (!session.elements) return
-    const key = `${session.guildId || 'private'}-${session.userId}`
-    const task = waitingMap.get(key)
-    if (!task) return
-
-    const imgEl = h.select(session.elements, 'img')[0]
-    if (!imgEl) return
-    const src = imgEl.attrs.src
-    if (!src) return
-
-    clearTimeout(task.timer)
-    waitingMap.delete(key)
-    await session.send(cfg.messages.generating)
-
     try {
-      const filePath = await downloadImage(src)
-      await generateImage(session, task.prompt, filePath)
+      if (!session.elements) return
+      const key = `${session.guildId || 'private'}-${session.userId}`
+      const task = waitingMap.get(key)
+      if (!task) return
+
+      const imgEl = h.select(session.elements, 'img')[0]
+      if (!imgEl) return
+      const src = imgEl.attrs.src
+      if (!src) return
+
+      clearTimeout(task.timer)
+      waitingMap.delete(key)
+      await session.send(cfg.messages.generating)
+
+      try {
+        const assetUrl = await assets.upload(src, 'ref_image.jpg')
+        if (debug) logger.info('[DEBUG] assets返回链接:', assetUrl)
+
+        // 严格检查是否为公网可访问的 http/https 链接
+        if (!/^https?:\/\//.test(assetUrl)) {
+          if (debug) logger.warn('[DEBUG] 非公网链接，请检查 assets 的 selfUrl 设置')
+          await session.send(cfg.messages.needAssets)
+          return
+        }
+
+        await generate(session, IMG2IMG_PROMPT_PREFIX + task.prompt, assetUrl)
+      } catch (e) {
+        logger.error('[ai-image] 图片处理失败', e)
+        await session.send(cfg.messages.fail)
+      }
     } catch (e) {
-      if (debug) logger.error('[DEBUG] 图片处理失败', e)
+      logger.error('[ai-image] 未捕获的异常', e)
       await session.send(cfg.messages.fail)
     }
   })
