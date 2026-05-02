@@ -47,6 +47,13 @@ export const Config = Schema.object({
     .default([])
     .description('图生图指令别名（仅在启用图生图时有效）'),
 
+  txt2imgPrompt: Schema.string()
+    .default('请严格遵循我的要求生成一张图片，不要询问或添加额外说明，直接输出图片。你可以使用联网功能获取最新的数据或信息。要求：{prompt}')
+    .description('文生图提示词模板。变量：{prompt} = 用户输入的提示词'),
+  img2imgPrompt: Schema.string()
+    .default('图片链接：{url} 请严格根据以下指令对提供的图片进行编辑或重绘，不要询问，直接输出结果。你可以使用联网功能获取最新的数据或信息。\n指令：{prompt}')
+    .description('图生图提示词模板。变量：{url} = 图片公网链接，{prompt} = 用户输入的提示词'),
+
   messages: Schema.object({
     generating: Schema.string().default('⏳ 生成中...').description('生成中提示'),
     waitImage: Schema.string().default('请在60秒内发送需要编辑的图片').description('等待图片提示'),
@@ -54,15 +61,13 @@ export const Config = Schema.object({
     empty: Schema.string().default('❌ 请输入提示词').description('无提示词提示'),
     noApi: Schema.string().default('❌ 未配置可用API').description('无可用API提示'),
     fail: Schema.string().default('❌ 生成失败').description('生成失败提示'),
-    needAssets: Schema.string().default('❌ 图生图需要正确配置 assets 服务的 selfUrl（当前链接非公网地址）').description('assets 返回非公网链接提示'),
+    modelTextOnly: Schema.string().default('❌ 模型未生成图片，返回文字：{text}').description('模型仅返回文本时的提示，变量：{text} = 模型实际返回的文字'),
+    needAssets: Schema.string().default('❌ 图生图需要正确配置 assets 服务（selfUrl 未正确设置或服务未启动）').description('assets 服务不可用提示'),
   }).description('提示文案配置'),
 }).description('AI 绘图插件配置')
 
 export async function apply(ctx: Context, cfg: Infer<typeof Config>) {
   const debug = cfg.debug
-
-  const TXT2IMG_PROMPT_PREFIX = '请严格遵循我的要求生成一张图片，不要询问或添加额外说明，直接输出图片。你可以使用联网功能获取最新的数据或信息。要求：'
-  const IMG2IMG_PROMPT_PREFIX = '请严格根据以下指令对提供的图片进行编辑或重绘，不要询问，直接输出结果。你可以使用联网功能获取最新的数据或信息。'
 
   try {
     const loc = path.join(__dirname, 'locales', 'zh-CN.yml')
@@ -73,8 +78,6 @@ export async function apply(ctx: Context, cfg: Infer<typeof Config>) {
 
   const waitingMap = new Map<string, { prompt: string; timer: NodeJS.Timeout }>()
   const idx = { val: 0 }
-
-  const assets = (ctx as any).assets
 
   function getApi() {
     const list = cfg.apiList.filter(v => v.enable && v.apiKey && v.baseUrl)
@@ -97,6 +100,50 @@ export async function apply(ctx: Context, cfg: Infer<typeof Config>) {
       await session.send(message)
     } catch (e) {
       logger.error('[ai-image] 发送消息失败', e)
+    }
+  }
+
+  function getErrorMessage(err: any): string {
+    if (axios.isAxiosError(err)) {
+      if (err.code === 'ECONNABORTED') return '请求超时'
+      if (err.code === 'ERR_NETWORK' || err.code?.startsWith('ERR_')) return '网络连接失败'
+      if (err.response) {
+        const status = err.response.status
+        if (status >= 500) return `服务器错误 (${status})`
+        if (status >= 400) return `请求错误 (${status})，请检查 API Key 或参数`
+      }
+      return err.message?.slice(0, 100) || '未知网络错误'
+    }
+    return '未知错误'
+  }
+
+  function extractFilenameFromAssetUrl(assetUrl: string): string | null {
+    if (!assetUrl) return null
+    try {
+      if (assetUrl.startsWith('file://')) {
+        const filePath = assetUrl.replace('file://', '')
+        return path.basename(filePath)
+      }
+      const urlObj = new URL(assetUrl)
+      const parts = urlObj.pathname.split('/')
+      return parts[parts.length - 1] || null
+    } catch {
+      return null
+    }
+  }
+
+  function deleteCachedFile(assetUrl: string) {
+    const filename = extractFilenameFromAssetUrl(assetUrl)
+    if (!filename) return
+    const defaultRoot = path.join(ctx.baseDir, 'data', 'assets')
+    const filePath = path.join(defaultRoot, filename)
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath)
+        if (debug) logger.info('[DEBUG] 已删除缓存文件:', filePath)
+      }
+    } catch (e) {
+      logger.error('[ai-image] 删除缓存文件失败', e)
     }
   }
 
@@ -132,29 +179,40 @@ export async function apply(ctx: Context, cfg: Infer<typeof Config>) {
       })
 
       if (debug) logger.info('[DEBUG] API返回:', JSON.stringify(res.data, null, 2))
+
       let imgUrl = res.data?.data?.[0]?.url || null
       if (!imgUrl) imgUrl = getImageUrlFromContent(res.data?.choices?.[0]?.message?.content || '')
 
       if (imgUrl) {
         await safeSend(session, segment.image(imgUrl.trim()))
       } else {
-        await safeSend(session, cfg.messages.fail)
+        const textContent = res.data?.choices?.[0]?.message?.content
+        if (textContent && typeof textContent === 'string' && textContent.trim().length > 0) {
+          const msg = cfg.messages.modelTextOnly.replace('{text}', textContent.trim().slice(0, 500))
+          await safeSend(session, msg)
+        } else {
+          await safeSend(session, cfg.messages.fail + '（未返回任何内容）')
+        }
       }
     } catch (err) {
-      logger.error('[ai-image] API请求失败', err)
-      await safeSend(session, cfg.messages.fail)
+      const reason = getErrorMessage(err)
+      logger.error(`[ai-image] API请求失败 [${reason}]`, err)
+      await safeSend(session, `${cfg.messages.fail} [${reason}]`)
     }
   }
 
   const cmd = ctx.command(`${cfg.command} <raw:text>`)
   cfg.aliases.forEach(alias => cmd.alias(alias))
+  if (!cfg.enableTxt2Img) (cmd as any).hidden = true
+
   cmd.action(async ({ session }, raw) => {
     try {
       if (!session || !cfg.enableTxt2Img) return
       const prompt = cleanHtmlTags(raw || '')
       if (!prompt) return safeSend(session, cfg.messages.empty)
       await safeSend(session, cfg.messages.generating)
-      await generate(session, TXT2IMG_PROMPT_PREFIX + prompt)
+      const finalPrompt = cfg.txt2imgPrompt.replace('{prompt}', prompt)
+      await generate(session, finalPrompt)
     } catch (e) {
       logger.error('[ai-image] 文生图命令异常', e)
       await safeSend(session, cfg.messages.fail)
@@ -163,9 +221,12 @@ export async function apply(ctx: Context, cfg: Infer<typeof Config>) {
 
   const imgCmd = ctx.command(`${cfg.img2imgCommand} <raw:text>`)
   cfg.img2imgAliases.forEach(alias => imgCmd.alias(alias))
+  if (!cfg.enableImg2Img) (imgCmd as any).hidden = true
+
   imgCmd.action(async ({ session }, raw) => {
     try {
       if (!session || !cfg.enableImg2Img) return
+      const assets = (ctx as any).assets
       if (!assets) return safeSend(session, cfg.messages.needAssets)
       const prompt = cleanHtmlTags(raw || '')
       if (!prompt) return safeSend(session, cfg.messages.empty)
@@ -201,8 +262,15 @@ export async function apply(ctx: Context, cfg: Infer<typeof Config>) {
       waitingMap.delete(key)
       await safeSend(session, cfg.messages.generating)
 
+      const assets = (ctx as any).assets
+      if (!assets) {
+        await safeSend(session, cfg.messages.needAssets)
+        return
+      }
+
+      let assetUrl = ''
       try {
-        const assetUrl = await assets.upload(src, 'ref_image.jpg')
+        assetUrl = await assets.upload(src, 'ref_image.jpg')
         if (debug) logger.info('[DEBUG] assets返回链接:', assetUrl)
 
         if (!/^https?:\/\//.test(assetUrl)) {
@@ -211,10 +279,17 @@ export async function apply(ctx: Context, cfg: Infer<typeof Config>) {
           return
         }
 
-        await generate(session, IMG2IMG_PROMPT_PREFIX + task.prompt, assetUrl)
+        const promptText = cfg.img2imgPrompt
+          .replace('{url}', assetUrl)
+          .replace('{prompt}', task.prompt)
+        await generate(session, promptText, assetUrl)
       } catch (e) {
         logger.error('[ai-image] 图片处理失败', e)
         await safeSend(session, cfg.messages.fail)
+      } finally {
+        if (assetUrl) {
+          deleteCachedFile(assetUrl)
+        }
       }
     } catch (e) {
       logger.error('[ai-image] 未捕获的异常', e)
