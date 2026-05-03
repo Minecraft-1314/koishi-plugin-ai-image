@@ -35,17 +35,17 @@ export const Config = Schema.object({
 
   command: Schema.string()
     .default('draw')
-    .description('文生图指令（仅在启用文生图时有效）'),
+    .description('文生图指令'),
   aliases: Schema.array(String)
     .default([])
-    .description('文生图指令别名（仅在启用文生图时有效）'),
+    .description('文生图指令别名'),
 
   img2imgCommand: Schema.string()
     .default('imgdraw')
-    .description('图生图指令（仅在启用图生图时有效）'),
+    .description('图生图指令'),
   img2imgAliases: Schema.array(String)
     .default([])
-    .description('图生图指令别名（仅在启用图生图时有效）'),
+    .description('图生图指令别名'),
 
   txt2imgPrompt: Schema.string()
     .default('请严格遵循我的要求生成一张图片，不要询问或添加额外说明，直接输出图片。你可以使用联网功能获取最新的数据或信息。要求：{prompt}')
@@ -63,6 +63,8 @@ export const Config = Schema.object({
     fail: Schema.string().default('❌ 生成失败').description('生成失败提示'),
     modelTextOnly: Schema.string().default('❌ 模型未生成图片，返回文字：{text}').description('模型仅返回文本时的提示，变量：{text} = 模型实际返回的文字'),
     needAssets: Schema.string().default('❌ 图生图需要正确配置 assets 服务（selfUrl 未正确设置或服务未启动）').description('assets 服务不可用提示'),
+    txt2imgDisabled: Schema.string().default('❌ 文生图功能未启用').description('文生图功能未启用时的提示'),
+    img2imgDisabled: Schema.string().default('❌ 图生图功能未启用').description('图生图功能未启用时的提示'),
   }).description('提示文案配置'),
 }).description('AI 绘图插件配置')
 
@@ -203,11 +205,10 @@ export async function apply(ctx: Context, cfg: Infer<typeof Config>) {
 
   const cmd = ctx.command(`${cfg.command} <raw:text>`)
   cfg.aliases.forEach(alias => cmd.alias(alias))
-  if (!cfg.enableTxt2Img) (cmd as any).hidden = true
-
   cmd.action(async ({ session }, raw) => {
     try {
-      if (!session || !cfg.enableTxt2Img) return
+      if (!session) return
+      if (!cfg.enableTxt2Img) return safeSend(session, cfg.messages.txt2imgDisabled)
       const prompt = cleanHtmlTags(raw || '')
       if (!prompt) return safeSend(session, cfg.messages.empty)
       await safeSend(session, cfg.messages.generating)
@@ -221,11 +222,10 @@ export async function apply(ctx: Context, cfg: Infer<typeof Config>) {
 
   const imgCmd = ctx.command(`${cfg.img2imgCommand} <raw:text>`)
   cfg.img2imgAliases.forEach(alias => imgCmd.alias(alias))
-  if (!cfg.enableImg2Img) (imgCmd as any).hidden = true
-
   imgCmd.action(async ({ session }, raw) => {
     try {
-      if (!session || !cfg.enableImg2Img) return
+      if (!session) return
+      if (!cfg.enableImg2Img) return safeSend(session, cfg.messages.img2imgDisabled)
       const assets = (ctx as any).assets
       if (!assets) return safeSend(session, cfg.messages.needAssets)
       const prompt = cleanHtmlTags(raw || '')
