@@ -392,7 +392,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     }
   }
 
-  const cmd = ctx.command(`${cfg.command} <raw:text>`)
+  const cmd = ctx.command(`${cfg.command} <raw:text>`, 'draw')
   cfg.aliases.forEach(alias => cmd.alias(alias))
   cmd.action(async ({ session }: any, raw: string) => {
     try {
@@ -411,7 +411,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     }
   })
 
-  const imgCmd = ctx.command(`${cfg.img2imgCommand} <raw:text>`)
+  const imgCmd = ctx.command(`${cfg.img2imgCommand} <raw:text>`, 'imgdraw')
   cfg.img2imgAliases.forEach(alias => imgCmd.alias(alias))
   imgCmd.action(async ({ session }: any, raw: string) => {
     try {
@@ -518,9 +518,9 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     }
   })
 
-  const blacklistCmd = ctx.command('blacklist')
+  const blacklistCmd = ctx.command('blacklist', 'blacklist')
 
-  blacklistCmd.subcommand('.list', '查看黑名单').action(async ({ session }: any) => {
+  blacklistCmd.subcommand('.list', 'blacklist.list').action(async ({ session }: any) => {
     if (!session) return
     if (!cfg.blacklistAdmins.includes(session.userId)) {
       return safeSend(session, cfg.messages.noPermission)
@@ -539,7 +539,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     }
   })
 
-  blacklistCmd.subcommand('.add <...targets:string>', '添加黑名单').action(async ({ session }: any, ...targets: string[]) => {
+  blacklistCmd.subcommand('.add <...targets:string>', 'blacklist.add').action(async ({ session }: any, ...targets: string[]) => {
     if (!session) return
     if (!cfg.blacklistAdmins.includes(session.userId)) {
       return safeSend(session, cfg.messages.noPermission)
@@ -569,7 +569,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     }
   })
 
-  blacklistCmd.subcommand('.remove <...targets:string>', '移除黑名单').action(async ({ session }: any, ...targets: string[]) => {
+  blacklistCmd.subcommand('.remove <...targets:string>', 'blacklist.remove').action(async ({ session }: any, ...targets: string[]) => {
     if (!session) return
     if (!cfg.blacklistAdmins.includes(session.userId)) {
       return safeSend(session, cfg.messages.noPermission)
