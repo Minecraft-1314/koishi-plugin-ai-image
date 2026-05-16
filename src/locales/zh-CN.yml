@@ -1,9 +1,15 @@
 name: AI 绘图
-description: 支持文生图、图生图、多API轮询/负载均衡、自动提示词、限流与超时控制
+description: 支持文生图、图生图、多API轮询/负载均衡、自动提示词、限流与超时控制，黑名单管理
 commands:
   draw:
     description: 文生图
     usage: 输入提示词即可生成图片
   imgdraw:
     description: 图生图
-    usage: 输入提示词后发送图片即可生成
+    usage: 输入提示词后发送图片，可发送多张，输入“完成”或“done”结束收集
+  blacklist:
+    description: 黑名单管理（仅管理员）
+    usage: |
+      blacklist list              查看黑名单
+      blacklist add <QQ号> [QQ号...]   加入黑名单
+      blacklist remove <QQ号> [QQ号...] 移出黑名单
