@@ -23,63 +23,64 @@ export const Config = Schema.object({
   timeout: Schema.number().default(300000).description('接口请求超时时间（毫秒）'),
   rateLimit: Schema.number().default(200).description('每小时调用次数限制'),
   imgWaitTime: Schema.number().default(60).description('图生图等待图片超时时间（秒）'),
-  model: Schema.string().default('gpt-4o-mini').description('通用模型名称（旧版兼容）'),
-  txt2imgModel: Schema.string().default('').description('文生图专用模型，留空则使用通用模型'),
-  img2imgModel: Schema.string().default('').description('图生图专用模型，留空则使用通用模型'),
-  imageSize: Schema.string().default('1024x768').description('默认图片尺寸'),
+  model: Schema.string().default('gpt-4o-mini').description('通用模型名称，文生图/图生图共用（留空则各自使用专用模型）'),
+  txt2imgModel: Schema.string().default('').description('文生图专用模型名称，留空则使用上方通用模型'),
+  img2imgModel: Schema.string().default('').description('图生图专用模型名称，留空则使用上方通用模型'),
+  imageSize: Schema.string().default('1024x1024').description('默认图片尺寸（格式：宽x高，如 1024x1024）'),
   maxImages: Schema.number().default(5).description('图生图最大支持图片数量'),
   apiList: Schema.array(Schema.object({
-    enable: Schema.boolean().default(true).description('启用此 API'),
-    apiKey: Schema.string().description('API Key'),
-    baseUrl: Schema.string().description('旧版兼容：接口地址（chat completions 端点）'),
-    endpoint: Schema.string().description('自定义请求完整 URL，支持模板变量 {model}'),
-    headers: Schema.string().default('{"Authorization":"Bearer {apiKey}","Content-Type":"application/json"}').description('请求头 JSON 模板，变量 {apiKey}'),
-    txt2imgBody: Schema.string().default('{"model":"{model}","prompt":"{prompt}","size":"{size}"}').description('文生图请求体 JSON 模板，变量 {model} {prompt} {size}'),
-    img2imgBody: Schema.string().default('{"model":"{model}","prompt":"{prompt}","size":"{size}","image":{{image_urls}}}').description('图生图请求体 JSON 模板，变量 {model} {prompt} {size} {{image_urls}}'),
-    responseImagePath: Schema.string().default('data.0.url').description('响应中图片 URL 的 JSON 路径，如 data.0.url'),
-    defaultSize: Schema.string().description('默认尺寸，留空使用全局 imageSize'),
-  })).default([]).description('API 配置列表（支持多账号负载及自定义端点）'),
+    enable: Schema.boolean().default(true).description('是否启用此 API 端点'),
+    apiKey: Schema.string().description('API 密钥（Bearer Token）'),
+    baseUrl: Schema.string().description('接口地址，支持 Chat Completions API'),
+    endpoint: Schema.string().description('自定义 API 完整 URL，支持变量：{model}=模型名称'),
+    headers: Schema.string().default('{"Authorization":"Bearer {apiKey}","Content-Type":"application/json"}').description('请求头 JSON 模板，支持变量：{apiKey}=API 密钥'),
+    txt2imgBody: Schema.string().default('{"model":"{model}","prompt":"{prompt}","size":"{size}"}').description('文生图请求体 JSON 模板。变量：{model}=模型名 {prompt}=提示词 {size}=尺寸'),
+    img2imgBody: Schema.string().default('{"model":"{model}","prompt":"{prompt}","size":"{size}","image":{{image_urls}}}').description('图生图请求体 JSON 模板。变量：{model}=模型名 {prompt}=提示词 {size}=尺寸 {{image_urls}}=图片URL数组'),
+    responseImagePath: Schema.string().default('data.0.url').description('响应 JSON 中图片 URL 的字段路径，用 . 和数字索引访问，如 data.0.url'),
+    defaultSize: Schema.string().description('该 API 的默认图片尺寸，留空则使用全局 imageSize'),
+    extraBody: Schema.string().default('').description('万能适配层：额外 JSON 字段，深度合并到请求体中。可填入 negative_prompt、steps、cfg_scale、seed、style 等任意 API 参数'),
+  })).default([]).description('API 配置列表，支持多账号轮询负载均衡'),
 
-  enableTxt2Img: Schema.boolean().default(true).description('启用文生图'),
-  enableImg2Img: Schema.boolean().default(true).description('启用图生图'),
+  enableTxt2Img: Schema.boolean().default(true).description('启用文生图功能'),
+  enableImg2Img: Schema.boolean().default(true).description('启用图生图功能'),
 
-  command: Schema.string().default('draw').description('文生图指令'),
-  aliases: Schema.array(String).default([]).description('文生图指令别名'),
+  command: Schema.string().default('draw').description('文生图触发指令'),
+  aliases: Schema.array(String).default([]).description('文生图指令的额外别名'),
 
-  img2imgCommand: Schema.string().default('imgdraw').description('图生图指令'),
-  img2imgAliases: Schema.array(String).default([]).description('图生图指令别名'),
+  img2imgCommand: Schema.string().default('imgdraw').description('图生图触发指令'),
+  img2imgAliases: Schema.array(String).default([]).description('图生图指令的额外别名'),
 
-  txt2imgPrompt: Schema.string().default('请严格遵循我的要求生成一张图片，不要询问或添加额外说明，直接输出图片。你可以使用联网功能获取最新的数据或信息。要求：{prompt}').description('文生图提示词模板'),
-  img2imgPrompt: Schema.string().default('图片链接：{url} 请严格根据以下指令对提供的图片进行编辑或重绘，不要询问，直接输出结果。你可以使用联网功能获取最新的数据或信息。\n指令：{prompt}').description('图生图提示词模板'),
+  txt2imgPrompt: Schema.string().default('请严格遵循我的要求生成一张图片，不要询问或添加额外说明，直接输出图片。你可以使用联网功能获取最新的数据或信息。要求：{prompt}').description('文生图提示词模板。变量：{prompt}=用户输入的提示词'),
+  img2imgPrompt: Schema.string().default('图片链接：{url} 请严格根据以下指令对提供的图片进行编辑或重绘，不要询问，直接输出结果。你可以使用联网功能获取最新的数据或信息。\n指令：{prompt}').description('图生图提示词模板。变量：{url}=上传后的图片链接 {prompt}=用户输入的编辑指令'),
 
-  blacklistAdmins: Schema.array(String).default([]).description('允许管理黑名单的 QQ 号列表'),
+  blacklistAdmins: Schema.array(String).default([]).description('黑名单管理员的 QQ 号列表'),
 
   messages: Schema.object({
-    generating: Schema.string().default('⏳ 生成中...'),
-    waitImage: Schema.string().default('请在{time}秒内发送需要编辑的图片'),
-    timeout: Schema.string().default('等待图片超时，已取消'),
-    empty: Schema.string().default('❌ 请输入提示词'),
-    noApi: Schema.string().default('❌ 未配置可用API'),
-    fail: Schema.string().default('❌ 生成失败'),
-    modelTextOnly: Schema.string().default('❌ 模型未生成图片，返回文字：{text}'),
-    needAssets: Schema.string().default('❌ 图生图需要正确配置 assets 服务（selfUrl 未正确设置或服务未启动）'),
-    txt2imgDisabled: Schema.string().default('❌ 文生图功能未启用'),
-    img2imgDisabled: Schema.string().default('❌ 图生图功能未启用'),
-    rateLimit: Schema.string().default('❌ 调用次数已达上限，请稍后再试'),
-    alreadyWaiting: Schema.string().default('你已在等待发送图片，请直接发送图片或等待超时'),
-    multiImageReceived: Schema.string().default('已收到 {count} 张图片，可继续发送或输入“完成”开始生成'),
-    multiImageLimit: Schema.string().default('已达到最大图片数量，自动开始生成'),
-    noImageReceived: Schema.string().default('未发送任何图片'),
-    blacklisted: Schema.string().default('❌ 你已被加入黑名单，无法使用绘图功能'),
-    noPermission: Schema.string().default('❌ 你没有权限管理黑名单'),
-    blacklistAddSuccess: Schema.string().default('✅ 已将 {targets} 加入黑名单'),
-    blacklistRemoveSuccess: Schema.string().default('✅ 已将 {targets} 移出黑名单'),
-    blacklistAddFail: Schema.string().default('⚠️ {targets} 已在黑名单中或无效'),
-    blacklistRemoveFail: Schema.string().default('⚠️ {targets} 不在黑名单中'),
-    invalidUserId: Schema.string().default('⚠️ 无效的QQ号：{targets}'),
-    blacklistListEmpty: Schema.string().default('✅ 当前黑名单为空'),
-    blacklistListTitle: Schema.string().default('📋 当前黑名单：'),
-  }).description('提示文案配置'),
+    generating: Schema.string().default('⏳ 生成中...').description('正在调用 API 生成图片时的提示'),
+    waitImage: Schema.string().default('请在{time}秒内发送需要编辑的图片').description('图生图等待用户上传图片的提示。变量：{time}=超时秒数'),
+    timeout: Schema.string().default('等待图片超时，已取消').description('图生图等待超时后的提示'),
+    empty: Schema.string().default('❌ 请输入提示词').description('用户未输入提示词时的提示'),
+    noApi: Schema.string().default('❌ 未配置可用API').description('没有可用 API 时的提示'),
+    fail: Schema.string().default('❌ 生成失败').description('API 调用失败时的通用提示'),
+    modelTextOnly: Schema.string().default('❌ 模型未生成图片，返回文字：{text}').description('模型返回了文本而非图片时的提示。变量：{text}=模型返回的文字内容'),
+    needAssets: Schema.string().default('❌ 图生图需要正确配置 assets 服务（selfUrl 未正确设置或服务未启动）').description('assets 服务未配置或不可用时的提示'),
+    txt2imgDisabled: Schema.string().default('❌ 文生图功能未启用').description('文生图功能被关闭时的提示'),
+    img2imgDisabled: Schema.string().default('❌ 图生图功能未启用').description('图生图功能被关闭时的提示'),
+    rateLimit: Schema.string().default('❌ 调用次数已达上限，请稍后再试').description('触发频率限制时的提示'),
+    alreadyWaiting: Schema.string().default('你已在等待发送图片，请直接发送图片或等待超时').description('用户重复发起图生图时的提示'),
+    multiImageReceived: Schema.string().default('已收到 {count} 张图片，可继续发送或输入“完成”开始生成').description('收到多张图片后的提示。变量：{count}=已收到的图片数量'),
+    multiImageLimit: Schema.string().default('已达到最大图片数量，自动开始生成').description('图片数量达到上限自动触发生成时的提示'),
+    noImageReceived: Schema.string().default('未发送任何图片').description('用户输入完成但未发送图片时的提示'),
+    blacklisted: Schema.string().default('❌ 你已被加入黑名单，无法使用绘图功能').description('黑名单用户尝试使用时的提示'),
+    noPermission: Schema.string().default('❌ 你没有权限管理黑名单').description('非管理员操作黑名单时的提示'),
+    blacklistAddSuccess: Schema.string().default('✅ 已将 {targets} 加入黑名单').description('添加黑名单成功时的提示。变量：{targets}=被加入的QQ号列表'),
+    blacklistRemoveSuccess: Schema.string().default('✅ 已将 {targets} 移出黑名单').description('移除黑名单成功时的提示。变量：{targets}=被移出的QQ号列表'),
+    blacklistAddFail: Schema.string().default('⚠️ {targets} 已在黑名单中或无效').description('添加黑名单失败时的提示。变量：{targets}=操作失败的QQ号列表'),
+    blacklistRemoveFail: Schema.string().default('⚠️ {targets} 不在黑名单中').description('移除黑名单失败时的提示。变量：{targets}=操作失败的QQ号列表'),
+    invalidUserId: Schema.string().default('⚠️ 无效的QQ号：{targets}').description('输入了无效QQ号时的提示。变量：{targets}=无效的QQ号列表'),
+    blacklistListEmpty: Schema.string().default('✅ 当前黑名单为空').description('黑名单为空时的提示'),
+    blacklistListTitle: Schema.string().default('📋 当前黑名单：').description('查看黑名单列表时的标题'),
+  }).description('所有提示文案的自定义配置，支持模板变量'),
 }).description('AI 绘图插件配置')
 
 declare module 'koishi' {
@@ -186,6 +187,18 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
 
   function escapeRegExp(str: string): string {
     return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  }
+
+  function deepMerge(target: any, source: any): any {
+    if (source === null || source === undefined) return target
+    if (target === null || target === undefined) return source
+    if (Array.isArray(target) && Array.isArray(source)) return [...target, ...source]
+    if (typeof target !== 'object' || typeof source !== 'object') return source
+    const result = { ...target }
+    for (const key of Object.keys(source)) {
+      result[key] = deepMerge(target[key], source[key])
+    }
+    return result
   }
 
   function getValueByPath(obj: any, pathStr: string): any {
@@ -415,6 +428,17 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       logger.error('请求体模板解析失败', e)
       await safeSend(session, cfg.messages.fail + '（模板配置错误）')
       return
+    }
+
+    if (api.extraBody) {
+      try {
+        const extra = JSON.parse(api.extraBody)
+        body = deepMerge(body, extra)
+      } catch (e) {
+        logger.error('extraBody JSON 解析失败', e)
+        await safeSend(session, cfg.messages.fail + '（extraBody 配置错误）')
+        return
+      }
     }
 
     if (debug) logger.info('自定义请求:', endpoint, JSON.stringify(body, null, 2))
