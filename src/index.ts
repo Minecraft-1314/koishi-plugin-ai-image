@@ -23,15 +23,22 @@ export const Config = Schema.object({
   timeout: Schema.number().default(300000).description('接口请求超时时间（毫秒）'),
   rateLimit: Schema.number().default(200).description('每小时调用次数限制'),
   imgWaitTime: Schema.number().default(60).description('图生图等待图片超时时间（秒）'),
-  model: Schema.string().default('gpt-4o-mini').description('通用模型名称'),
+  model: Schema.string().default('gpt-4o-mini').description('通用模型名称（旧版兼容）'),
   txt2imgModel: Schema.string().default('').description('文生图专用模型，留空则使用通用模型'),
   img2imgModel: Schema.string().default('').description('图生图专用模型，留空则使用通用模型'),
+  imageSize: Schema.string().default('1024x768').description('默认图片尺寸'),
   maxImages: Schema.number().default(5).description('图生图最大支持图片数量'),
   apiList: Schema.array(Schema.object({
     enable: Schema.boolean().default(true).description('启用此 API'),
     apiKey: Schema.string().description('API Key'),
-    baseUrl: Schema.string().description('接口地址，需符合 OpenAI 标准'),
-  })).default([]).description('API 配置列表（支持多账号负载）'),
+    baseUrl: Schema.string().description('旧版兼容：接口地址（chat completions 端点）'),
+    endpoint: Schema.string().description('自定义请求完整 URL，支持模板变量 {model}'),
+    headers: Schema.string().default('{"Authorization":"Bearer {apiKey}","Content-Type":"application/json"}').description('请求头 JSON 模板，变量 {apiKey}'),
+    txt2imgBody: Schema.string().default('{"model":"{model}","prompt":"{prompt}","size":"{size}"}').description('文生图请求体 JSON 模板，变量 {model} {prompt} {size}'),
+    img2imgBody: Schema.string().default('{"model":"{model}","prompt":"{prompt}","size":"{size}","image":{{image_urls}}}').description('图生图请求体 JSON 模板，变量 {model} {prompt} {size} {{image_urls}}'),
+    responseImagePath: Schema.string().default('data.0.url').description('响应中图片 URL 的 JSON 路径，如 data.0.url'),
+    defaultSize: Schema.string().description('默认尺寸，留空使用全局 imageSize'),
+  })).default([]).description('API 配置列表（支持多账号负载及自定义端点）'),
 
   enableTxt2Img: Schema.boolean().default(true).description('启用文生图'),
   enableImg2Img: Schema.boolean().default(true).description('启用图生图'),
@@ -49,7 +56,7 @@ export const Config = Schema.object({
 
   messages: Schema.object({
     generating: Schema.string().default('⏳ 生成中...'),
-    waitImage: Schema.string().default('请在60秒内发送需要编辑的图片'),
+    waitImage: Schema.string().default('请在{time}秒内发送需要编辑的图片'),
     timeout: Schema.string().default('等待图片超时，已取消'),
     empty: Schema.string().default('❌ 请输入提示词'),
     noApi: Schema.string().default('❌ 未配置可用API'),
@@ -92,6 +99,8 @@ interface WaitingTask {
   imageUrls: string[]
 }
 
+type ApiConfig = Infer<typeof Config>['apiList'][number]
+
 export async function apply(ctx: any, cfg: Infer<typeof Config>) {
   const debug = cfg.debug
 
@@ -103,7 +112,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
   } catch {}
 
   const waitingMap = new Map<string, WaitingTask>()
-  const apiIdx = { val: 0 }
+  let apiRoundRobinIdx = 0
   const apiCallTimestamps: number[] = []
 
   ctx.model.extend('ai_image_blacklist', {
@@ -120,36 +129,126 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     waitingMap.clear()
   })
 
+  const IMG_URL_RE = /https?:\/\/[^<> \n\r()\[\]]+\.(png|jpg|jpeg|gif|webp)/i
+
   function checkRateLimit(): boolean {
     const now = Date.now()
     const oneHourAgo = now - 3600000
-    while (apiCallTimestamps.length > 0 && apiCallTimestamps[0] < oneHourAgo) {
-      apiCallTimestamps.shift()
+    let trimIdx = 0
+    while (trimIdx < apiCallTimestamps.length && apiCallTimestamps[trimIdx] < oneHourAgo) {
+      trimIdx++
     }
-    return apiCallTimestamps.length < cfg.rateLimit
+    if (trimIdx > 0) {
+      apiCallTimestamps.splice(0, trimIdx)
+    }
+    return apiCallTimestamps.length + 1 <= cfg.rateLimit
   }
 
   function recordApiCall() {
     apiCallTimestamps.push(Date.now())
   }
 
-  function getApi() {
-    const list = cfg.apiList.filter(v => v.enable && v.apiKey && v.baseUrl)
-    if (!list.length) return null
-    if (cfg.apiStrategy === 'sequence') return list[0]
-    const api = list[apiIdx.val % list.length]
-    apiIdx.val++
+  let cachedApiList: ApiConfig[] | null = null
+  let cachedApiListKey = ''
+
+  function getApi(): ApiConfig | null {
+    const key = `${cfg.apiStrategy}|${cfg.apiList.map(a => `${a.enable}|${a.apiKey}|${a.baseUrl}|${a.endpoint}`).join(',')}`
+    if (!cachedApiList || cachedApiListKey !== key) {
+      cachedApiList = cfg.apiList.filter(v => v.enable && v.apiKey && (v.baseUrl || v.endpoint))
+      cachedApiListKey = key
+      apiRoundRobinIdx = 0
+    }
+    if (!cachedApiList.length) return null
+    if (cfg.apiStrategy === 'sequence') return cachedApiList[0]
+    const api = cachedApiList[apiRoundRobinIdx % cachedApiList.length]
+    apiRoundRobinIdx++
     return api
   }
 
-  function cleanHtmlTags(str: string) {
-    return str.replace(/<[^>]+>/g, '').trim()
+  function isCustomApi(api: ApiConfig): boolean {
+    return !!api.endpoint
   }
 
-  function getImageUrlFromContent(text: string) {
-    const reg = /https?:\/\/[^<> \n\r()\[\]]+\.(png|jpg|jpeg|gif|webp)/i
-    const match = text.match(reg)
-    return match ? match[0] : null
+  function resolveTemplate(template: string, vars: Record<string, any>): any {
+    let result = template
+    for (const [key, value] of Object.entries(vars)) {
+      if (key.startsWith('__arr_')) {
+        const arr = value as string[]
+        const jsonArr = JSON.stringify(arr)
+        result = result.replace(new RegExp(`\\{\\{${escapeRegExp(key.slice(6))}\\}\\}`, 'g'), jsonArr)
+      } else {
+        const strVal = typeof value === 'string' ? value : String(value)
+        result = result.replace(new RegExp(`\\{${escapeRegExp(key)}\\}`, 'g'), JSON.stringify(strVal).slice(1, -1))
+      }
+    }
+    return JSON.parse(result)
+  }
+
+  function escapeRegExp(str: string): string {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  }
+
+  function getValueByPath(obj: any, pathStr: string): any {
+    if (!obj || !pathStr) return undefined
+    const normalized = pathStr.replace(/\[(\d+)\]/g, '.$1')
+    const keys = normalized.split('.').filter(k => k !== '')
+    let current = obj
+    for (const key of keys) {
+      if (current === undefined || current === null) return undefined
+      const numKey = /^\d+$/.test(key) ? parseInt(key) : key
+      current = current[numKey]
+    }
+    return current
+  }
+
+  function extractImageUrl(response: any, pathStr?: string): string | null {
+    if (pathStr) {
+      const direct = getValueByPath(response, pathStr)
+      if (typeof direct === 'string' && /^https?:\/\//.test(direct)) return direct
+    }
+    const defaultUrl = getValueByPath(response, 'data.0.url')
+    if (typeof defaultUrl === 'string' && /^https?:\/\//.test(defaultUrl)) return defaultUrl
+
+    const content = getValueByPath(response, 'choices.0.message.content')
+    if (typeof content === 'string') {
+      const match = content.match(IMG_URL_RE)
+      if (match) return match[0]
+    }
+    return null
+  }
+
+  function extractImageUrlFromStandardResponse(response: any): string | null {
+    let imgUrl = response?.data?.[0]?.url || null
+    if (imgUrl && /^https?:\/\//.test(imgUrl)) return imgUrl
+    const textContent = response?.choices?.[0]?.message?.content
+    if (textContent && typeof textContent === 'string') {
+      const match = textContent.match(IMG_URL_RE)
+      if (match) return match[0]
+    }
+    return null
+  }
+
+  async function handleImageResponse(session: any, imageUrl: string | null, responseData: any) {
+    if (imageUrl) {
+      await safeSend(session, segment.image(imageUrl.trim()))
+      return
+    }
+    const textContent = getValueByPath(responseData, 'choices.0.message.content')
+    if (typeof textContent === 'string' && textContent.trim().length > 0) {
+      const msg = cfg.messages.modelTextOnly.replace('{text}', textContent.trim().slice(0, 500))
+      await safeSend(session, msg)
+    } else {
+      await safeSend(session, cfg.messages.fail + '（未返回任何内容）')
+    }
+  }
+
+  function validateEndpointUrl(url: string): boolean {
+    try {
+      const parsed = new URL(url)
+      return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+    } catch {
+      return false
+    }
   }
 
   async function safeSend(session: any, message: string | h) {
@@ -162,12 +261,20 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
 
   function getErrorMessage(err: any): string {
     if (axios.isAxiosError(err)) {
-      if (err.code === 'ECONNABORTED') return '请求超时'
-      if (err.code === 'ERR_NETWORK' || err.code?.startsWith('ERR_')) return '网络连接失败'
+      if (err.code === 'ECONNABORTED') return '请求超时，请稍后重试'
+      if (err.code === 'ERR_NETWORK' || err.code?.startsWith('ERR_')) return '网络连接失败，请检查网络或API地址'
       if (err.response) {
         const status = err.response.status
-        if (status >= 500) return `服务器错误 (${status})`
-        if (status >= 400) return `请求错误 (${status})，请检查 API Key 或参数`
+        const statusMessages: Record<number, string> = {
+          400: '请求参数错误',
+          401: 'API Key 无效或已过期',
+          403: '无权访问该资源',
+          404: 'API 端点不存在',
+          429: '请求过于频繁，请稍后重试',
+        }
+        if (statusMessages[status]) return `${statusMessages[status]} (${status})`
+        if (status >= 500) return `服务器内部错误 (${status})，请稍后重试`
+        if (status >= 400) return `请求错误 (${status})`
       }
       return err.message?.slice(0, 100) || '未知网络错误'
     }
@@ -272,6 +379,73 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     return { success, fail }
   }
 
+  async function customGenerate(
+    session: any,
+    api: ApiConfig,
+    prompt: string,
+    imageUrls: string[] = [],
+    modelOverride?: string
+  ) {
+    const model = modelOverride || cfg.model
+    const size = api.defaultSize || cfg.imageSize
+
+    const endpointTemplate = api.endpoint || api.baseUrl
+    const headersTemplate = api.headers || '{"Authorization":"Bearer {apiKey}","Content-Type":"application/json"}'
+
+    const bodyTemplate = imageUrls.length > 0 ? api.img2imgBody : api.txt2imgBody
+
+    const endpoint = endpointTemplate.replace(/\{model\}/g, model)
+
+    const headersVars: Record<string, any> = { apiKey: api.apiKey }
+    const headers = resolveTemplate(headersTemplate, headersVars)
+
+    const bodyVars: Record<string, any> = {
+      model,
+      prompt,
+      size,
+    }
+    if (imageUrls.length > 0) {
+      bodyVars['__arr_image_urls'] = imageUrls
+    }
+
+    let body: any
+    try {
+      body = resolveTemplate(bodyTemplate, bodyVars)
+    } catch (e) {
+      logger.error('请求体模板解析失败', e)
+      await safeSend(session, cfg.messages.fail + '（模板配置错误）')
+      return
+    }
+
+    if (debug) logger.info('自定义请求:', endpoint, JSON.stringify(body, null, 2))
+
+    if (!validateEndpointUrl(endpoint)) {
+      logger.error('无效的API端点URL:', endpoint)
+      await safeSend(session, cfg.messages.fail + '（API端点配置无效）')
+      return
+    }
+
+    try {
+      const res = await axios.post(endpoint, body, {
+        headers,
+        timeout: cfg.timeout,
+      })
+
+      if (debug) logger.info('自定义响应:', JSON.stringify(res.data, null, 2))
+
+      const imgUrl = extractImageUrl(res.data, api.responseImagePath)
+      await handleImageResponse(session, imgUrl, res.data)
+    } catch (err) {
+      const reason = getErrorMessage(err)
+      logger.error(`自定义API请求失败 [${reason}]`, err)
+      await safeSend(session, `${cfg.messages.fail} [${reason}]`)
+    } finally {
+      if (imageUrls.length > 0) {
+        deleteAllCachedFiles(imageUrls)
+      }
+    }
+  }
+
   async function generate(session: any, prompt: string, imageUrl?: string, modelOverride?: string) {
     if (!checkRateLimit()) {
       await safeSend(session, cfg.messages.rateLimit)
@@ -283,6 +457,12 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       if (debug) logger.info('无可用API')
       await safeSend(session, cfg.messages.noApi)
       return
+    }
+
+    recordApiCall()
+
+    if (isCustomApi(api)) {
+      return customGenerate(session, api, prompt, imageUrl ? [imageUrl] : [], modelOverride)
     }
 
     const model = modelOverride || cfg.model
@@ -304,7 +484,6 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     if (debug) logger.info('请求体:', JSON.stringify(body, null, 2))
 
     try {
-      recordApiCall()
       const res = await axios.post(api.baseUrl, body, {
         headers: { Authorization: `Bearer ${api.apiKey}` },
         timeout: cfg.timeout,
@@ -312,20 +491,8 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
 
       if (debug) logger.info('API返回:', JSON.stringify(res.data, null, 2))
 
-      let imgUrl = res.data?.data?.[0]?.url || null
-      if (!imgUrl) imgUrl = getImageUrlFromContent(res.data?.choices?.[0]?.message?.content || '')
-
-      if (imgUrl) {
-        await safeSend(session, segment.image(imgUrl.trim()))
-      } else {
-        const textContent = res.data?.choices?.[0]?.message?.content
-        if (textContent && typeof textContent === 'string' && textContent.trim().length > 0) {
-          const msg = cfg.messages.modelTextOnly.replace('{text}', textContent.trim().slice(0, 500))
-          await safeSend(session, msg)
-        } else {
-          await safeSend(session, cfg.messages.fail + '（未返回任何内容）')
-        }
-      }
+      const imgUrl = extractImageUrlFromStandardResponse(res.data)
+      await handleImageResponse(session, imgUrl, res.data)
     } catch (err) {
       const reason = getErrorMessage(err)
       logger.error(`API请求失败 [${reason}]`, err)
@@ -346,8 +513,14 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       return
     }
 
+    recordApiCall()
+
+    if (isCustomApi(api)) {
+      return customGenerate(session, api, prompt, imageUrls, modelOverride)
+    }
+
     const model = modelOverride || cfg.model
-    const finalPrompt = prompt.replace('{url}', imageUrls.join(', '))
+    const finalPrompt = prompt.replace(/\{url\}/g, imageUrls.join(', '))
     const content = [
       { type: 'text', text: finalPrompt },
       ...imageUrls.map(url => ({ type: 'image_url', image_url: { url } })),
@@ -361,7 +534,6 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     if (debug) logger.info('多图请求体:', JSON.stringify(body, null, 2))
 
     try {
-      recordApiCall()
       const res = await axios.post(api.baseUrl, body, {
         headers: { Authorization: `Bearer ${api.apiKey}` },
         timeout: cfg.timeout,
@@ -369,20 +541,8 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
 
       if (debug) logger.info('API返回:', JSON.stringify(res.data, null, 2))
 
-      let imgUrl = res.data?.data?.[0]?.url || null
-      if (!imgUrl) imgUrl = getImageUrlFromContent(res.data?.choices?.[0]?.message?.content || '')
-
-      if (imgUrl) {
-        await safeSend(session, segment.image(imgUrl.trim()))
-      } else {
-        const textContent = res.data?.choices?.[0]?.message?.content
-        if (textContent && typeof textContent === 'string' && textContent.trim().length > 0) {
-          const msg = cfg.messages.modelTextOnly.replace('{text}', textContent.trim().slice(0, 500))
-          await safeSend(session, msg)
-        } else {
-          await safeSend(session, cfg.messages.fail + '（未返回任何内容）')
-        }
-      }
+      const imgUrl = extractImageUrlFromStandardResponse(res.data)
+      await handleImageResponse(session, imgUrl, res.data)
     } catch (err) {
       const reason = getErrorMessage(err)
       logger.error(`API请求失败 [${reason}]`, err)
@@ -411,6 +571,18 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     }
   })
 
+  function createImageWaitTimer(session: any, key: string, task: WaitingTask): NodeJS.Timeout {
+    return setTimeout(() => {
+      waitingMap.delete(key)
+      if (task.imageUrls.length > 0) {
+        safeSend(session, cfg.messages.generating).catch(() => {})
+        generateWithMultipleImages(session, task.prompt, task.imageUrls, cfg.img2imgModel || cfg.model)
+      } else {
+        safeSend(session, cfg.messages.timeout).catch(() => {})
+      }
+    }, cfg.imgWaitTime * 1000)
+  }
+
   const imgCmd = ctx.command(`${cfg.img2imgCommand} <raw:text>`, 'imgdraw')
   cfg.img2imgAliases.forEach(alias => imgCmd.alias(alias))
   imgCmd.action(async ({ session }: any, raw: string) => {
@@ -428,19 +600,10 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
         return safeSend(session, cfg.messages.alreadyWaiting)
       }
 
-      await safeSend(session, cfg.messages.waitImage.replace('60', String(cfg.imgWaitTime)))
-      const timer = setTimeout(() => {
-        const task = waitingMap.get(key)
-        if (!task) return
-        waitingMap.delete(key)
-        if (task.imageUrls.length > 0) {
-          safeSend(session, cfg.messages.generating).catch(() => {})
-          generateWithMultipleImages(session, task.prompt, task.imageUrls, cfg.img2imgModel || cfg.model)
-        } else {
-          safeSend(session, cfg.messages.timeout).catch(() => {})
-        }
-      }, cfg.imgWaitTime * 1000)
-      waitingMap.set(key, { prompt, timer, imageUrls: [] })
+      await safeSend(session, cfg.messages.waitImage.replace('{time}', String(cfg.imgWaitTime)))
+      const task: WaitingTask = { prompt, timer: null as any, imageUrls: [] }
+      task.timer = createImageWaitTimer(session, key, task)
+      waitingMap.set(key, task)
     } catch (e) {
       logger.error('图生图命令异常', e)
       await safeSend(session, cfg.messages.fail)
@@ -488,15 +651,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
         }
 
         clearTimeout(task.timer)
-        task.timer = setTimeout(() => {
-          waitingMap.delete(key)
-          if (task.imageUrls.length > 0) {
-            safeSend(session, cfg.messages.generating).catch(() => {})
-            generateWithMultipleImages(session, task.prompt, task.imageUrls, cfg.img2imgModel || cfg.model)
-          } else {
-            safeSend(session, cfg.messages.timeout).catch(() => {})
-          }
-        }, cfg.imgWaitTime * 1000)
+        task.timer = createImageWaitTimer(session, key, task)
         await safeSend(session, cfg.messages.multiImageReceived.replace('{count}', String(task.imageUrls.length)))
         return
       }
@@ -598,4 +753,8 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       await safeSend(session, cfg.messages.blacklistRemoveFail.replace('{targets}', fail.join(', ')))
     }
   })
+
+  function cleanHtmlTags(str: string) {
+    return str.replace(/<[^>]+>/g, '').trim()
+  }
 }
