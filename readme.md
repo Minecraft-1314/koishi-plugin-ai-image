@@ -57,6 +57,7 @@ Image‑to‑image supports **multiple reference images** with configurable maxi
 | `imageSize` | 默认图片尺寸（宽x高） | `1024x1024` |
 | **🔗 API 列表** | 每个条目可独立配置端点、请求模板和透传参数 | `[]` |
 | `apiList[].enable` | 是否启用此 API | `true` |
+| `apiList[].backend` | 后端类型：`custom` / `agnes` / `openai` / `stability` / `leonardo` / `replicate` / `flux` / `midjourney` / `getimg` / `ideogram` / `venice` / `prodia` / `deepai` / `recraft` / `imagen` / `xai` | `custom` |
 | `apiList[].apiKey` | API 密钥 | (空) |
 | `apiList[].baseUrl` | 接口地址，支持 Chat Completions API | (空) |
 | `apiList[].endpoint` | 自定义 API 完整 URL，支持 `{model}` 变量 | (空) |
@@ -98,6 +99,7 @@ Image‑to‑image supports **multiple reference images** with configurable maxi
 | `imageSize` | Default image size (WxH) | `1024x1024` |
 | **🔗 API List** | | `[]` |
 | `apiList[].enable` | Enable this API | `true` |
+| `apiList[].backend` | Backend type: `custom` / `agnes` / `openai` / `stability` / `leonardo` / `replicate` / `flux` / `midjourney` / `getimg` / `ideogram` / `venice` / `prodia` / `deepai` / `recraft` / `imagen` / `xai` | `custom` |
 | `apiList[].apiKey` | API key | (empty) |
 | `apiList[].baseUrl` | Endpoint URL, Chat Completions API compatible | (empty) |
 | `apiList[].endpoint` | Custom full URL, supports `{model}` | (empty) |
@@ -201,6 +203,54 @@ Image‑to‑image supports **multiple reference images** with configurable maxi
 ```
 
 `extraBody` 中的字段会**深度合并**到模板生成的请求体中，同名顶层字段以 `extraBody` 为准。你可以只填写需要覆盖或追加的参数，无需修改模板。
+
+---
+
+## 内置后端自动适配 (Built-in Backend Auto-Adaptation)
+
+除了手动编写模板，插件为主流平台提供了**一键适配**。只需设置 `backend` 字段，插件自动生成对应 API 的请求体，无需关心底层字段差异。
+
+| backend 值 | 平台 | 自动处理内容 |
+|------------|------|-------------|
+| `agnes` | Agnes AI | 尺寸合并为 `size` 字符串、图片放入 `extra_body.image` 数组、Base64 补全 data URI 前缀 |
+| `openai` | OpenAI (DALL·E) | DALL·E 3 尺寸校验/调整、图生图自动切换 `/v1/images/edits` 端点、`n`/`response_format` 映射 |
+| `stability` | Stability AI | prompt 包装为 `text_prompts` 数组、负向提示词负权重映射、文生图/图生图/蒙版路由自动切换端点 |
+| `leonardo` | Leonardo AI | 模型 ID 映射、`cfg_scale`→`guidance_scale` 等字段重命名、`scheduler` 映射 |
+| `replicate` | Replicate | 模型路径解析、参数重命名（`steps`→`num_inference_steps`）、`input` 嵌套结构 |
+| `flux` | BFL Flux (Black Forest Labs) | 异步 API，自动轮询；`guidance`/`safety_tolerance`/`seed` 等参数透传；支持图生图 |
+| `midjourney` | Midjourney (via proxy) | 异步 API，自动轮询；尺寸→`--ar` 比例、`--stylize`/`--chaos`/`--seed` 等参数内联到 prompt |
+| `getimg` | getimg.ai | 同步 API；`negative_prompt`/`guidance`/`steps`/`seed`/`num_images` 透传；支持图生图 |
+| `ideogram` | Ideogram | 尺寸→`aspect_ratio` 比例映射；`text_prompt`/`style_preset`/`magic_prompt_option` 支持；V4 模型精准文字渲染 |
+| `venice` | Venice AI (42+模型) | `model` 可选 flux-dev/flux-pro/sdxl/dalle-3 等；`cfg_scale`/`steps`/`style_preset` 透传 |
+| `prodia` | Prodia | ⏳异步 API，极速推理；`negative_prompt`/`steps`/`cfg_scale`/`sampler`/`seed` 透传 |
+| `deepai` | DeepAI | URLSearchParams 格式；支持 text2image/image-editor；`api-key` 请求头认证 |
+| `recraft` | Recraft AI | `style` 风格预设（digital_illustration 等）；`reference_image` 图生图支持 |
+| `imagen` | Google Imagen / Gemini Image | Gemini(默认) 用 `generateContent` + `responseModalities`；Imagen 用 Vertex AI `instances/parameters` 嵌套 |
+| `xai` | xAI Grok Imagine | OpenAI 兼容 Images API；`grok-imagine-image-quality`(推荐)；`n`/`response_format`/`size` 标准格式 |
+| `microsoft` | Microsoft MAI Image | Azure Foundry OpenAI 兼容；`mai-image-2`(推荐)/`mai-image-1`/DALL·E 3(托管) |
+| `firefly` | Adobe Firefly | 需 OAuth2 认证(client_id+client_secret)；`size{width,height}` 对象格式；Firefly Image Model 5 |
+
+### 使用方式
+
+只需在 API 配置中将 `backend` 设为目标平台，其余字段留空即可：
+
+```json
+{
+  "enable": true,
+  "backend": "stability",
+  "apiKey": "sk-xxxx",
+  "model": "stable-diffusion-xl-1024-v1-0",
+  "defaultSize": "1024x1024",
+  "extraBody": "{\"cfg_scale\":7,\"steps\":30,\"seed\":0,\"style_preset\":\"cinematic\"}"
+}
+```
+
+插件自动生成 Stability AI 格式的请求体，并在调试日志中输出 `[stability] 警告:` 说明哪些参数被忽略或调整。`warnings` 会记录不支持的字段，帮助调试配置。
+
+### 与手动模板的关系
+
+- `backend = "custom"`（默认）：完全按照 `txt2imgBody` / `img2imgBody` 模板构建请求，`extraBody` 深度合并
+- `backend = "agnes"` 等：忽略 `txt2imgBody` / `img2imgBody`，由内置转换器自动生成请求体，`extraBody` 仍会作为额外参数被转换器读取（如 `cfg_scale`、`negative_prompt` 等）
 
 ---
 

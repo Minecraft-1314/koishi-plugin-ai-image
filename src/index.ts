@@ -23,21 +23,22 @@ export const Config = Schema.object({
   timeout: Schema.number().default(300000).description('接口请求超时时间（毫秒）'),
   rateLimit: Schema.number().default(200).description('每小时调用次数限制'),
   imgWaitTime: Schema.number().default(60).description('图生图等待图片超时时间（秒）'),
-  model: Schema.string().default('gpt-4o-mini').description('通用模型名称，文生图/图生图共用（留空则各自使用专用模型）'),
+  model: Schema.string().default('gpt-image-2').description('通用模型名称，文生图/图生图共用。GPT Image 2/1.5 使用 Chat Completions；DALL·E 3 使用 Images API'),
   txt2imgModel: Schema.string().default('').description('文生图专用模型名称，留空则使用上方通用模型'),
   img2imgModel: Schema.string().default('').description('图生图专用模型名称，留空则使用上方通用模型'),
   imageSize: Schema.string().default('1024x1024').description('默认图片尺寸（格式：宽x高，如 1024x1024）'),
   maxImages: Schema.number().default(5).description('图生图最大支持图片数量'),
   apiList: Schema.array(Schema.object({
     enable: Schema.boolean().default(true).description('是否启用此 API 端点'),
-    apiKey: Schema.string().description('API 密钥（Bearer Token）'),
+    backend: Schema.string().default('custom').description('后端类型(41家)：custom / agnes / openai / stability / leonardo / replicate / flux / midjourney / getimg / ideogram / venice / prodia / deepai / recraft / imagen / xai / microsoft / firefly / luma / zai / amazon / baidu / aliyun / tencent / seedream / huawei / xfyun / sense / meitu / minimax / kuaishou / stepfun / openrouter / together / fal / segmind / deepinfra / atlas / comet / wavespeed / qiniu'),
+    apiKey: Schema.string().description('API 密钥（Bearer Token 或平台专用 Key）'),
     baseUrl: Schema.string().description('接口地址，支持 Chat Completions API'),
     endpoint: Schema.string().description('自定义 API 完整 URL，支持变量：{model}=模型名称'),
     headers: Schema.string().default('{"Authorization":"Bearer {apiKey}","Content-Type":"application/json"}').description('请求头 JSON 模板，支持变量：{apiKey}=API 密钥'),
-    txt2imgBody: Schema.string().default('{"model":"{model}","prompt":"{prompt}","size":"{size}"}').description('文生图请求体 JSON 模板。变量：{model}=模型名 {prompt}=提示词 {size}=尺寸'),
-    img2imgBody: Schema.string().default('{"model":"{model}","prompt":"{prompt}","size":"{size}","image":{{image_urls}}}').description('图生图请求体 JSON 模板。变量：{model}=模型名 {prompt}=提示词 {size}=尺寸 {{image_urls}}=图片URL数组'),
+    txt2imgBody: Schema.string().default('{"model":"{model}","prompt":"{prompt}","size":"{size}"}').description('文生图请求体 JSON 模板（backend=custom 时生效）。变量：{model}=模型名 {prompt}=提示词 {size}=尺寸'),
+    img2imgBody: Schema.string().default('{"model":"{model}","prompt":"{prompt}","size":"{size}","image":{{image_urls}}}').description('图生图请求体 JSON 模板（backend=custom 时生效）。变量：{model}=模型名 {prompt}=提示词 {size}=尺寸 {{image_urls}}=图片URL数组'),
     responseImagePath: Schema.string().default('data.0.url').description('响应 JSON 中图片 URL 的字段路径，用 . 和数字索引访问，如 data.0.url'),
-    defaultSize: Schema.string().description('该 API 的默认图片尺寸，留空则使用全局 imageSize'),
+    defaultSize: Schema.string().description('该 API 的默认图片尺寸（WxH），留空则使用全局 imageSize'),
     extraBody: Schema.string().default('').description('万能适配层：额外 JSON 字段，深度合并到请求体中。可填入 negative_prompt、steps、cfg_scale、seed、style 等任意 API 参数'),
   })).default([]).description('API 配置列表，支持多账号轮询负载均衡'),
 
@@ -392,6 +393,849 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     return { success, fail }
   }
 
+  function parseSize(sizeStr: string): { width: number, height: number } {
+    const parts = sizeStr.split('x')
+    const w = parseInt(parts[0]) || 1024
+    const h = parseInt(parts[1]) || 1024
+    return { width: w, height: h }
+  }
+
+  function ensureBase64DataUri(url: string): string {
+    if (/^https?:\/\//.test(url)) return url
+    if (/^data:/.test(url)) return url
+    return `data:image/png;base64,${url}`
+  }
+
+  interface BackendResult {
+    endpoint: string
+    body: any
+    warnings: string[]
+    headers?: string
+    responseImagePath?: string
+  }
+
+  function buildAgnesBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://apihub.agnes-ai.com/v1/images/generations'
+    const isImg2Img = imageUrls.length > 0
+    const warnings: string[] = []
+    const body: any = { model, prompt, size: `${width}x${height}` }
+    const extra: any = {}
+
+    if (outputFormat === 'base64' && !isImg2Img) {
+      body.return_base64 = true
+    } else if (outputFormat === 'base64' && isImg2Img) {
+      extra.response_format = 'b64_json'
+    } else {
+      extra.response_format = 'url'
+    }
+
+    if (isImg2Img) {
+      extra.image = imageUrls.map(u => ensureBase64DataUri(u))
+    }
+
+    if (Object.keys(extra).length > 0) {
+      body.extra_body = extra
+    }
+
+    warnings.push('Agnes 不支持: negative_prompt, num_outputs(固定1张), seed, steps, cfg_scale, sampler, mask, strength, style, extensions')
+
+    return { endpoint, body, warnings, responseImagePath: 'data.0.url' }
+  }
+
+  function buildOpenAIBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const isDalle3 = model.includes('dall-e-3')
+    const isGptImage = model.includes('gpt-image')
+    const warnings: string[] = []
+    let endpoint = api.endpoint || (isGptImage
+      ? 'https://api.openai.com/v1/chat/completions'
+      : 'https://api.openai.com/v1/images/generations')
+
+    let body: any
+    let responsePath = 'data.0.url'
+
+    if (isGptImage) {
+      const content: any[] = [{ type: 'text', text: prompt }]
+      if (imageUrls.length > 0) {
+        content.push(...imageUrls.map(url => ({ type: 'image_url', image_url: { url } })))
+      }
+      body = { model, messages: [{ role: 'user', content }] }
+      responsePath = 'choices.0.message.content'
+      warnings.push('GPT Image 使用 Chat Completions API，返回格式为 Markdown 图片链接')
+    } else {
+      body = { model, prompt, n: 1, response_format: outputFormat === 'base64' ? 'b64_json' : 'url' }
+      if (isDalle3) {
+        const validSizes = ['1024x1024', '1792x1024', '1024x1792']
+        const candidate = `${width}x${height}`
+        body.size = validSizes.includes(candidate) ? candidate : '1024x1024'
+        if (body.size !== candidate) warnings.push(`DALL·E 3 尺寸调整为 ${body.size}`)
+        body.quality = 'standard'
+      } else {
+        body.size = `${width}x${height}`
+      }
+      if (imageUrls.length > 0) {
+        if (isDalle3) {
+          warnings.push('DALL·E 3 不支持图生图/编辑，已降级为文生图')
+        } else {
+          endpoint = 'https://api.openai.com/v1/images/edits'
+          body.image = imageUrls[0]
+          if (imageUrls.length > 1) body.mask = imageUrls[1]
+          delete body.n
+          delete body.response_format
+          delete body.size
+        }
+      }
+    }
+
+    if (!isGptImage && api.extraBody) {
+      try { const eb = JSON.parse(api.extraBody); if (eb.style) body.style = eb.style } catch {}
+    }
+
+    warnings.push('OpenAI 不支持: negative_prompt, steps, cfg_scale, sampler, extensions')
+
+    return { endpoint, body, warnings, responseImagePath: responsePath }
+  }
+
+  function buildStabilityBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const engineId = model || 'stable-diffusion-3.5-large'
+    const baseUrl = 'https://api.stability.ai/v1/generation'
+    const isImg2Img = imageUrls.length > 0
+    const warnings: string[] = [`Stability AI 引擎: ${engineId}；可用: stable-diffusion-3.5-large / sd3.5-medium / stable-diffusion-xl-1024-v1-0(SDXL) / stable-image-ultra / stable-image-core`]
+    const negativePrompt = (() => { try { if (api.extraBody) return JSON.parse(api.extraBody).negative_prompt } catch { return '' } })()
+    const useMasking = isImg2Img && imageUrls.length > 1
+
+    let endpoint: string
+    if (useMasking) endpoint = `${baseUrl}/${engineId}/image-to-image/masking`
+    else if (isImg2Img) endpoint = `${baseUrl}/${engineId}/image-to-image`
+    else endpoint = `${baseUrl}/${engineId}/text-to-image`
+
+    const body: any = {
+      text_prompts: [{ text: prompt, weight: 1.0 }],
+      width, height,
+    }
+
+    if (negativePrompt) {
+      body.text_prompts.push({ text: negativePrompt, weight: -1.0 })
+    }
+
+    if (isImg2Img) {
+      body.init_image = imageUrls[0]
+      if (useMasking) body.mask_image = imageUrls[1]
+    }
+
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.samples !== undefined) body.samples = extra.samples
+    if (extra.steps !== undefined) body.steps = extra.steps
+    if (extra.seed !== undefined) body.seed = extra.seed
+    if (extra.cfg_scale !== undefined) body.cfg_scale = extra.cfg_scale
+    if (extra.sampler !== undefined) body.sampler = extra.sampler
+    if (outputFormat !== 'base64') body.output_format = outputFormat === 'url' ? 'png' : outputFormat
+
+    if (extra.style_preset !== undefined) body.style_preset = extra.style_preset
+    if (extra.image_strength !== undefined) body.image_strength = extra.image_strength
+
+    if (outputFormat === 'base64') warnings.push('Stability AI 不支持 base64 输出，已使用 png')
+    if (extra.style) warnings.push('Stability AI 使用 style_preset 而非 style')
+    if (extra.loras !== undefined || extra.controlnet !== undefined) warnings.push('Stability AI 支持 loras/controlnet，但需根据引擎版本确认')
+
+    return { endpoint, body, warnings, responseImagePath: 'artifacts.0.base64' }
+  }
+
+  function buildLeonardoBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://cloud.leonardo.ai/api/rest/v1/generations'
+    const warnings: string[] = []
+    const body: any = { prompt, modelId: model || '6bef9f1b-29cb-40c7-b9df-32b51c1f67d3', width, height }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+
+    if (extra.negative_prompt) body.negative_prompt = extra.negative_prompt
+    if (extra.num_images !== undefined) body.num_images = extra.num_images
+    if (extra.seed !== undefined) body.seed = extra.seed
+    if (extra.steps !== undefined) body.steps = extra.steps
+    if (extra.guidance_scale !== undefined) body.guidance_scale = extra.guidance_scale
+    if (extra.scheduler !== undefined) body.scheduler = extra.scheduler
+    if (extra.preset_style !== undefined) body.preset_style = extra.preset_style
+
+    if (imageUrls.length > 0) {
+      body.init_image = imageUrls[0]
+    }
+
+    warnings.push('Leonardo.ai 模型: Phoenix / Lightning XL / Kino XL / Vision XL / Diffusion XL；不支持 extensions(LoRA/ControlNet)')
+
+    return { endpoint, body, warnings, responseImagePath: 'generations_by_pk.generated_images.0.url' }
+  }
+
+  function buildReplicateBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const modelPath = model || 'stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b'
+    const endpoint = api.endpoint || `https://api.replicate.com/v1/models/${modelPath}/predictions`
+    const warnings: string[] = []
+    const body: any = {
+      version: modelPath.split(':')[1] || '',
+      input: { prompt, width, height },
+    }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+
+    if (extra.negative_prompt) body.input.negative_prompt = extra.negative_prompt
+    if (extra.num_inference_steps !== undefined) body.input.num_inference_steps = extra.num_inference_steps
+    if (extra.guidance_scale !== undefined) body.input.guidance_scale = extra.guidance_scale
+    if (extra.seed !== undefined) body.input.seed = extra.seed
+    if (extra.scheduler !== undefined) body.input.scheduler = extra.scheduler
+    if (imageUrls.length > 0) body.input.image = imageUrls[0]
+
+    warnings.push('Replicate 参数因模型而异，请对照模型文档确认字段名；不支持 base64 输出')
+
+    return { endpoint, body, warnings, responseImagePath: 'output.0' }
+  }
+
+  async function pollForResult(pollUrl: string, taskId: string, headers: any, timeoutMs: number): Promise<any> {
+    const start = Date.now()
+    const interval = 2000
+    while (Date.now() - start < timeoutMs) {
+      await new Promise(r => setTimeout(r, interval))
+      try {
+        const res = await axios.get(`${pollUrl}?id=${taskId}`, { headers, timeout: 10000 })
+        if (res.data?.status === 'Ready' || res.data?.status === 'succeeded') {
+          return res.data
+        }
+        if (res.data?.status === 'failed' || res.data?.status === 'Task not found') {
+          throw new Error(`任务失败: ${JSON.stringify(res.data)}`)
+        }
+        if (res.data?.result?.sample || res.data?.result?.url || res.data?.output) {
+          return res.data
+        }
+      } catch (e: any) {
+        if (e.message?.includes('任务失败')) throw e
+      }
+    }
+    throw new Error('轮询超时：任务未在限定时间内完成')
+  }
+
+  function buildFluxBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const modelPath = model || 'flux-2-pro'
+    const endpoint = api.endpoint || `https://api.bfl.ai/v1/${modelPath}`
+    const warnings: string[] = []
+    const body: any = { prompt, width, height }
+
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.steps) body.steps = extra.steps
+    if (extra.guidance !== undefined) body.guidance = extra.guidance
+    if (extra.safety_tolerance !== undefined) body.safety_tolerance = extra.safety_tolerance
+    if (extra.seed !== undefined) body.seed = extra.seed
+    if (extra.num_outputs !== undefined) body.num_outputs = extra.num_outputs
+    if (imageUrls.length > 0) body.input_image = imageUrls[0]
+
+    warnings.push(`BFL ${modelPath} 为异步 API，插件自动轮询；FLUX.2 系列含 Pro / Dev / Schnell 及 Kontext 等变体`)
+    if (extra.negative_prompt) warnings.push('Flux 不原生支持 negative_prompt')
+
+    return { endpoint, body, warnings, responseImagePath: 'result.sample' }
+  }
+
+  function buildMidjourneyBody(api: ApiConfig, _model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.midjourney-api.com/v1/imagine'
+    const warnings: string[] = []
+    const arMap: Record<string, string> = {
+      '1024x1024': '--ar 1:1', '1024x1792': '--ar 9:16', '1792x1024': '--ar 16:9',
+      '768x1024': '--ar 3:4', '1024x768': '--ar 4:3',
+    }
+    const arStr = arMap[`${width}x${height}`] || `--ar ${width}:${height}`
+
+    let finalPrompt = `${prompt} ${arStr}`
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.stylize !== undefined) finalPrompt += ` --stylize ${extra.stylize}`
+    if (extra.chaos !== undefined) finalPrompt += ` --chaos ${extra.chaos}`
+    if (extra.seed !== undefined) finalPrompt += ` --seed ${extra.seed}`
+    if (extra.negative_prompt) finalPrompt += ` --no ${extra.negative_prompt}`
+
+    const body: any = { prompt: finalPrompt }
+    if (imageUrls.length > 0) body.reference_image = imageUrls[0]
+
+    warnings.push('Midjourney 异步 API（V8/V7/Niji 6），插件自动轮询(约1-3分钟)；参数通过 prompt 内联: --ar/--stylize/--chaos/--seed/--no')
+
+    return { endpoint, body, warnings, responseImagePath: 'result.url' }
+  }
+
+  function buildGetimgBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.getimg.ai/v2/images/generations'
+    const warnings: string[] = []
+    const body: any = { model: model || 'essential-v2', prompt, width, height }
+
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.negative_prompt = extra.negative_prompt
+    if (extra.steps !== undefined) body.steps = extra.steps
+    if (extra.guidance !== undefined) body.guidance = extra.guidance
+    if (extra.seed !== undefined) body.seed = extra.seed
+    if (extra.num_images !== undefined) body.num_images = extra.num_images
+    if (imageUrls.length > 0) body.image = imageUrls[0]
+
+    return { endpoint, body, warnings, responseImagePath: 'image.url' }
+  }
+
+  function buildIdeogramBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.ideogram.ai/v1/ideogram-v4/generate'
+    const warnings: string[] = []
+    const arMap: Record<string, string> = {
+      '1024x1024': '1:1', '1024x1792': '9:16', '1792x1024': '16:9',
+      '768x1024': '3:4', '1024x768': '4:3', '1280x720': '16:9',
+    }
+    const aspectRatio = arMap[`${width}x${height}`] || '1:1'
+    const body: any = { text_prompt: prompt, aspect_ratio: aspectRatio, model: model || 'V_4' }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.negative_prompt = extra.negative_prompt
+    if (extra.style_preset) body.style_preset = extra.style_preset
+    if (extra.seed !== undefined) body.seed = extra.seed
+    if (extra.magic_prompt_option) body.magic_prompt_option = extra.magic_prompt_option
+    if (imageUrls.length > 0) body.image = imageUrls[0]
+    warnings.push('Ideogram 模型: UNI 1.1 Max / Ideogram 4.0(V_4) / Ideogram v3 / Ideogram 2.0')
+    return { endpoint, body, warnings, responseImagePath: 'data.0.url' }
+  }
+
+  function buildVeniceBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.venice.ai/api/v1/image/generate'
+    const warnings: string[] = []
+    const body: any = { model: model || 'flux-dev', prompt, width, height }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.negative_prompt = extra.negative_prompt
+    if (extra.cfg_scale !== undefined) body.cfg_scale = extra.cfg_scale
+    if (extra.steps !== undefined) body.steps = extra.steps
+    if (extra.seed !== undefined) body.seed = extra.seed
+    if (extra.style_preset) body.style_preset = extra.style_preset
+    if (extra.num_images !== undefined) body.num_images = extra.num_images
+    if (imageUrls.length > 0) body.image_url = imageUrls[0]
+    warnings.push('Venice 聚合42+模型，model 可选 flux-dev/flux-pro/sdxl/dalle-3 等')
+    return { endpoint, body, warnings, responseImagePath: 'images.0.url' }
+  }
+
+  function buildProdiaBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.prodia.com/v1/job'
+    const warnings: string[] = []
+    const body: any = { model: model || 'sdxl', prompt, width, height }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.negative_prompt = extra.negative_prompt
+    if (extra.steps !== undefined) body.steps = extra.steps
+    if (extra.cfg_scale !== undefined) body.cfg_scale = extra.cfg_scale
+    if (extra.seed !== undefined) body.seed = extra.seed
+    if (extra.sampler) body.sampler = extra.sampler
+    if (extra.num_images !== undefined) body.num_images = extra.num_images
+    if (imageUrls.length > 0) body.image_url = imageUrls[0]
+    warnings.push('Prodia 为异步 API，插件自动轮询等待结果')
+    return { endpoint, body, warnings, responseImagePath: 'imageUrl' }
+  }
+
+  function buildDeepAIBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.deepai.org/api/text2image'
+    const warnings: string[] = []
+    const body = new URLSearchParams()
+    body.append('text', prompt)
+    if (width && height) body.append('width', String(width))
+    if (imageUrls.length > 0) body.append('image', imageUrls[0])
+    warnings.push('DeepAI 使用 FormData/URLSearchParams 格式；支持 text2image、image-editor 等端点')
+    return { endpoint, body, warnings, responseImagePath: 'output_url', headers: '{"api-key":"{apiKey}"}' }
+  }
+
+  function buildRecraftBody(api: ApiConfig, _model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.recraft.ai/v1/images/generations'
+    const warnings: string[] = []
+    const body: any = { prompt, style: 'digital_illustration', size: `${width}x${height}` }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.style) body.style = extra.style
+    if (extra.negative_prompt) body.negative_prompt = extra.negative_prompt
+    if (extra.num_images !== undefined) body.num_images = extra.num_images
+    if (imageUrls.length > 0) body.reference_image = imageUrls[0]
+    warnings.push('Recraft 模型: V4.1 Utility(最新) / V4 / V3 / 20B / Realistic；style: digital_illustration / realistic_image / vector_illustration')
+    return { endpoint, body, warnings, responseImagePath: 'data.0.url' }
+  }
+
+  function buildImagenBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const isGemini = model?.includes('gemini')
+    const geminiModelId = model || 'gemini-3-pro-image-preview'
+    const endpoint = api.endpoint || (isGemini
+      ? `https://generativelanguage.googleapis.com/v1beta/models/${geminiModelId}:generateContent`
+      : 'https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-001:predict')
+    const warnings: string[] = []
+    const sizeKey = `${width}x${height}`
+
+    let body: any
+    let responsePath = 'predictions.0.bytesBase64Encoded'
+
+    if (isGemini) {
+      const parts: any[] = [{ text: prompt }]
+      if (imageUrls.length > 0) {
+        parts.push(...imageUrls.map(url => ({ fileData: { fileUri: url, mimeType: 'image/png' } })))
+      }
+      body = {
+        contents: [{ role: 'user', parts }],
+        generationConfig: {
+          responseModalities: ['IMAGE', 'TEXT'],
+          imageConfig: { aspectRatio: sizeKey === '1024x1792' ? '9:16' : sizeKey === '1792x1024' ? '16:9' : '1:1' },
+        },
+      }
+      responsePath = 'candidates.0.content.parts'
+      warnings.push('Gemini Image (Nano Banana) 使用 Gemini API，返回 base64 图片数据')
+    } else {
+      const validSizes = ['1024x1024', '1024x1792', '1792x1024', '1536x1536', '2048x2048']
+      const finalSize = validSizes.includes(sizeKey) ? sizeKey : '1024x1024'
+      body = { instances: [{ prompt }], parameters: { sampleCount: 1, imageSize: finalSize } }
+      let extra: any = {}
+      try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+      if (extra.negative_prompt) body.instances[0].negativePrompt = extra.negative_prompt
+      if (extra.num_images) body.parameters.sampleCount = extra.num_images
+      if (extra.seed !== undefined) body.parameters.seed = extra.seed
+      if (imageUrls.length > 0) warnings.push('Imagen 图生图请使用 Gemini API 图片编辑端点')
+    }
+
+    warnings.push('Google 模型需要 API Key，格式可通过 ?key=xxx 查询参数或 x-goog-api-key 请求头')
+    return { endpoint, body, warnings, responseImagePath: responsePath }
+  }
+
+  function buildXaiBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.x.ai/v1/images/generations'
+    const warnings: string[] = []
+    const body: any = { model: model || 'grok-imagine-image-quality', prompt, n: 1, response_format: outputFormat === 'base64' ? 'b64_json' : 'url', size: `${width}x${height}` }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.num_images) body.n = extra.num_images
+    if (imageUrls.length > 0) body.reference_image = imageUrls[0]
+    warnings.push('xAI Grok Imagine(Grok Imagine) 使用 OpenAI 兼容 Images API；模型: grok-imagine-image-quality(推荐/默认) / grok-imagine-image-pro(已弃用)')
+    return { endpoint, body, warnings, responseImagePath: 'data.0.url' }
+  }
+
+  function buildMicrosoftBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.microsoft.com/foundry/v1/images/generations'
+    const warnings: string[] = []
+    const body: any = { model: model || 'mai-image-2', prompt, n: 1, size: `${width}x${height}` }
+    if (outputFormat === 'base64') body.response_format = 'b64_json'
+    else body.response_format = 'url'
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.num_images) body.n = extra.num_images
+    if (imageUrls.length > 0) body.image = imageUrls[0]
+    warnings.push('Microsoft MAI Image(Azure Foundry) OpenAI 兼容；模型: mai-image-2 / mai-image-1 / dall-e-3(托管)')
+    return { endpoint, body, warnings, responseImagePath: 'data.0.url' }
+  }
+
+  function buildFireflyBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://firefly-api.adobe.io/v2/images/generate'
+    const warnings: string[] = []
+    const body: any = { prompt, n: 1, size: { width, height } }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.style) body.style = extra.style
+    if (extra.negative_prompt) body.negative_prompt = extra.negative_prompt
+    if (extra.num_images) body.n = extra.num_images
+    if (imageUrls.length > 0) body.reference_image = imageUrls[0]
+    warnings.push('Adobe Firefly Image Model 5 需要 OAuth2 认证(client_id+client_secret)；apiKey 格式为 Bearer Token')
+    return { endpoint, body, warnings, responseImagePath: 'outputs.0.url' }
+  }
+
+  function buildLumaBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.lumalabs.ai/v1/photon/generate'
+    const warnings: string[] = []
+    const body: any = { model: model || 'photon', prompt, width, height }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.negative_prompt = extra.negative_prompt
+    if (extra.num_images) body.num_images = extra.num_images
+    if (extra.seed !== undefined) body.seed = extra.seed
+    if (imageUrls.length > 0) body.reference_image = imageUrls[0]
+    warnings.push('Luma AI (Dream Machine) Photon 图像模型；端点和参数可能随版本调整')
+    return { endpoint, body, warnings, responseImagePath: 'images.0.url' }
+  }
+
+  function buildZaiBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://open.bigmodel.cn/api/paas/v4/images/generations'
+    const warnings: string[] = []
+    const body: any = { model: model || 'cogview-4', prompt, size: `${width}x${height}` }
+    if (outputFormat === 'base64') body.response_format = 'b64_json'
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.num_images) body.n = extra.num_images
+    if (imageUrls.length > 0) body.image = imageUrls[0]
+    warnings.push('Z-AI(智谱) 模型: CogView-4 / Z-Image Turbo / CogView-3-Plus / CogView-3；OpenAI兼容，支持中英文及汉字渲染')
+    return { endpoint, body, warnings, responseImagePath: 'data.0.url' }
+  }
+
+  function buildAmazonBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://bedrock-runtime.us-east-1.amazonaws.com/model/amazon.titan-image-generator-v2/invoke'
+    const warnings: string[] = []
+    const body: any = {
+      taskType: 'TEXT_IMAGE',
+      textToImageParams: { text: prompt },
+      imageGenerationConfig: { numberOfImages: 1, width, height, cfgScale: 8 },
+    }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.textToImageParams.negativeText = extra.negative_prompt
+    if (extra.seed !== undefined) body.imageGenerationConfig.seed = extra.seed
+    if (extra.num_images) body.imageGenerationConfig.numberOfImages = extra.num_images
+    if (model?.includes('nova')) {
+      body.taskType = 'TEXT_IMAGE'
+      warnings.push('Amazon Nova Canvas 使用 Bedrock API，请求格式可能与 Titan 略有差异')
+    }
+    if (imageUrls.length > 0) warnings.push('Amazon 图生图请使用 imageGenerationConfig 中的 initImage 字段')
+    warnings.push('⚠️ Amazon Bedrock 需要 AWS SigV4 签名认证，apiKey 需配置为 AWS Access Key；推荐通过 IAM 角色或代理转发')
+    return { endpoint, body, warnings, responseImagePath: 'images.0' }
+  }
+
+  function buildBaiduBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop/text2image/ernie-vilg-v2'
+    const warnings: string[] = []
+    const body: any = { text: prompt, resolution: `${width}*${height}`, style: 'base', num: 1 }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.style) body.style = extra.style
+    if (extra.num) body.num = extra.num
+    if (extra.seed !== undefined) body.seed = extra.seed
+    if (imageUrls.length > 0) body.url = imageUrls[0]
+    warnings.push('百度 ERNIE-Image(文心一格) 异步 API；需 OAuth2 access_token；模型: ERNIE-Image / ERNIE-ViLG v2')
+    return { endpoint, body, warnings, responseImagePath: 'data.0.image' }
+  }
+
+  function buildAliyunBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis'
+    const warnings: string[] = []
+    const body: any = { model: model || 'qwen-image-2.0-plus', input: { prompt }, parameters: { size: `${width}*${height}`, n: 1 } }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.input.negative_prompt = extra.negative_prompt
+    if (extra.seed !== undefined) body.parameters.seed = extra.seed
+    if (extra.num_images) body.parameters.n = extra.num_images
+    if (imageUrls.length > 0) body.input.ref_image = imageUrls[0]
+    warnings.push('阿里通义(Qwen-Image) DashScope API；模型: Qwen-Image-2.0 Max/Pro/Plus / 通义万相 Wan2.7')
+    return { endpoint, body, warnings, responseImagePath: 'output.results.0.url' }
+  }
+
+  function buildTencentBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://hunyuan.tencentcloudapi.com'
+    const warnings: string[] = []
+    const body: any = { Prompt: prompt, Resolution: `${width}:${height}`, Style: '201' }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.NegativePrompt = extra.negative_prompt
+    if (extra.style) body.Style = extra.style
+    if (extra.num) body.Num = extra.num
+    if (imageUrls.length > 0) body.InputImage = imageUrls[0]
+    warnings.push('腾讯混元(Hunyuan Image 3.0) 需 TC3-HMAC-SHA256 签名；模型: Hunyuan Image 3.0 / 3.0 Plus')
+    return { endpoint, body, warnings, responseImagePath: 'ResultImage' }
+  }
+
+  function buildSeedreamBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://ark.cn-beijing.volces.com/api/v3/images/generations'
+    const warnings: string[] = []
+    const body: any = { model: model || 'seedream-5.0-lite', prompt, size: `${width}x${height}`, n: 1 }
+    if (outputFormat === 'base64') body.response_format = 'b64_json'
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.negative_prompt = extra.negative_prompt
+    if (extra.seed !== undefined) body.seed = extra.seed
+    if (extra.num_images) body.n = extra.num_images
+    if (imageUrls.length > 0) body.image = imageUrls[0]
+    warnings.push('字节即梦(Seedream) 火山引擎 OpenAI 兼容；模型: Seedream 5.0 / Seedream 4.5 / Seedream 4.0')
+    return { endpoint, body, warnings, responseImagePath: 'data.0.url' }
+  }
+
+  function buildHuaweiBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://{pangu-endpoint}.myhuaweicloud.com/v1/{project_id}/pangu/image/generations'
+    const warnings: string[] = []
+    const body: any = { prompt, resolution: { width, height }, n: 1 }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.negative_prompt = extra.negative_prompt
+    if (imageUrls.length > 0) warnings.push('盘古图生图请联系华为云确认端点')
+    warnings.push('华为盘古 PanGu-Draw 需华为云 project_id + IAM 认证；apiKey 为 Token')
+    return { endpoint, body, warnings, responseImagePath: 'results.0.url' }
+  }
+
+  function buildXfyunBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://spark-api-open.xf-yun.com/v1/images/generations'
+    const warnings: string[] = []
+    const body: any = { model: model || 'general', prompt, width, height }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.negative_prompt = extra.negative_prompt
+    if (extra.num_images) body.num_images = extra.num_images
+    if (imageUrls.length > 0) body.image = imageUrls[0]
+    warnings.push('科大讯飞星火(Spark) 图像 API；模型: general / spark-image-xl；需讯飞开放平台 APPID+APIKey')
+    return { endpoint, body, warnings, responseImagePath: 'data.0.url' }
+  }
+
+  function buildSenseBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.sensenova.cn/v1/images/generations'
+    const warnings: string[] = []
+    const body: any = { model: model || 'miaohua-v3', prompt, size: `${width}x${height}` }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.negative_prompt = extra.negative_prompt
+    if (extra.num_images) body.n = extra.num_images
+    if (imageUrls.length > 0) body.image = imageUrls[0]
+    warnings.push('商汤秒画(Miaohua) SenseNova API；模型: miaohua-v3')
+    return { endpoint, body, warnings, responseImagePath: 'images.0.url' }
+  }
+
+  function buildMeituBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.meitu.com/v1/images/generations'
+    const warnings: string[] = []
+    const body: any = { model: model || 'miracle-vision-v4', prompt, size: `${width}x${height}` }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.negative_prompt = extra.negative_prompt
+    if (extra.num_images) body.n = extra.num_images
+    if (imageUrls.length > 0) body.reference_image = imageUrls[0]
+    warnings.push('美图(MiracleVision) 图像 API；模型: miracle-vision-v4 / v3')
+    return { endpoint, body, warnings, responseImagePath: 'data.0.url' }
+  }
+
+  function buildMinimaxBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.minimax.chat/v1/image/generation'
+    const warnings: string[] = []
+    const body: any = { model: model || 'image-01', prompt, image_size: `${width}x${height}` }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.negative_prompt = extra.negative_prompt
+    if (extra.n) body.n = extra.n
+    if (imageUrls.length > 0) body.image = imageUrls[0]
+    warnings.push('MiniMax Hailuo(海螺) 系列 图像 API；模型: image-01 / hailuo')
+    return { endpoint, body, warnings, responseImagePath: 'data.image_url' }
+  }
+
+  function buildKuaishouBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.klingai.com/v1/images/generations'
+    const warnings: string[] = []
+    const body: any = { model: model || 'kling-1.6', prompt, size: `${width}x${height}`, n: 1 }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.negative_prompt = extra.negative_prompt
+    if (extra.seed !== undefined) body.seed = extra.seed
+    if (extra.num_images) body.n = extra.num_images
+    if (imageUrls.length > 0) body.image = imageUrls[0]
+    warnings.push('快手可灵(Kling) 图像 API；模型: Kling 1.6 / 1.5 / Kolors；支持图生图')
+    return { endpoint, body, warnings, responseImagePath: 'data.0.url' }
+  }
+
+  function buildStepfunBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.stepfun.com/v1/images/generations'
+    const warnings: string[] = []
+    const body: any = { model: model || 'step-1x', prompt, size: `${width}x${height}` }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.negative_prompt = extra.negative_prompt
+    if (extra.num_images) body.n = extra.num_images
+    if (extra.seed !== undefined) body.seed = extra.seed
+    if (imageUrls.length > 0) body.image = imageUrls[0]
+    warnings.push('阶跃星辰 Step-1X 系列 图像 API；模型: step-1x / step-2')
+    return { endpoint, body, warnings, responseImagePath: 'data.0.url' }
+  }
+
+  function buildOpenrouterBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://openrouter.ai/api/v1/images/generations'
+    const warnings: string[] = []
+    const body: any = { model: model || 'gpt-image-2', prompt, n: 1, size: `${width}x${height}` }
+    if (outputFormat === 'base64') body.response_format = 'b64_json'
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.num_images) body.n = extra.num_images
+    if (imageUrls.length > 0) body.image = imageUrls[0]
+    warnings.push('OpenRouter 聚合300+模型；OpenAI 兼容；model 可选 gpt-image-2/gemini-3-pro-image/flux/dev 等')
+    return { endpoint, body, warnings, responseImagePath: 'data.0.url' }
+  }
+
+  function buildTogetherBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.together.xyz/v1/images/generations'
+    const warnings: string[] = []
+    const body: any = { model: model || 'black-forest-labs/FLUX.2-dev', prompt, n: 1, width, height }
+    if (outputFormat === 'base64') body.response_format = 'b64_json'
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.steps) body.steps = extra.steps
+    if (extra.seed !== undefined) body.seed = extra.seed
+    if (extra.num_images) body.n = extra.num_images
+    if (imageUrls.length > 0) body.image_url = imageUrls[0]
+    warnings.push('Together AI 聚合多模型；OpenAI 兼容；支持 FLUX/SD/SDXL 等开源模型')
+    return { endpoint, body, warnings, responseImagePath: 'data.0.url' }
+  }
+
+  function buildFalBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const modelPath = model || 'fal-ai/flux/dev'
+    const endpoint = api.endpoint || `https://fal.run/${modelPath}`
+    const warnings: string[] = []
+    const body: any = { prompt, image_size: { width, height } }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.negative_prompt = extra.negative_prompt
+    if (extra.steps) body.num_inference_steps = extra.steps
+    if (extra.seed !== undefined) body.seed = extra.seed
+    if (extra.guidance_scale !== undefined) body.guidance_scale = extra.guidance_scale
+    if (imageUrls.length > 0) body.image_url = imageUrls[0]
+    warnings.push('fal.ai 聚合平台，独家访问 ByteDance/Alibaba 等模型；路径格式: fal-ai/flux/dev / stabilityai/sdxl 等')
+    return { endpoint, body, warnings, responseImagePath: 'images.0.url' }
+  }
+
+  function buildSegmindBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], _outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.segmind.com/v1/txt2img'
+    const warnings: string[] = []
+    const body: any = { model: model || 'sdxl', prompt, width, height, samples: 1 }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.negative_prompt = extra.negative_prompt
+    if (extra.steps) body.steps = extra.steps
+    if (extra.seed !== undefined) body.seed = extra.seed
+    if (extra.samples) body.samples = extra.samples
+    if (imageUrls.length > 0) body.image = imageUrls[0]
+    warnings.push('Segmind 聚合平台；支持 SD/SDXL/Flux 等多模型')
+    return { endpoint, body, warnings, responseImagePath: 'image' }
+  }
+
+  function buildDeepinfraBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.deepinfra.com/v1/inference/black-forest-labs/FLUX-2-dev'
+    const warnings: string[] = []
+    const body: any = { input: { prompt, width, height } }
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.input.negative_prompt = extra.negative_prompt
+    if (extra.steps) body.input.num_inference_steps = extra.steps
+    if (extra.seed !== undefined) body.input.seed = extra.seed
+    if (imageUrls.length > 0) body.input.image = imageUrls[0]
+    if (outputFormat === 'base64') warnings.push('DeepInfra 默认返回 URL')
+    warnings.push('DeepInfra 聚合开源模型；支持 FLUX/SD/SDXL 等；默认模型 FLUX.2-dev')
+    return { endpoint, body, warnings, responseImagePath: 'output.url' }
+  }
+
+  function buildAtlasBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.atlascloud.ai/v1/images/generations'
+    const warnings: string[] = []
+    const body: any = { model: model || 'flux/dev', prompt, n: 1, size: `${width}x${height}` }
+    if (outputFormat === 'base64') body.response_format = 'b64_json'
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.negative_prompt = extra.negative_prompt
+    if (extra.num_images) body.n = extra.num_images
+    if (imageUrls.length > 0) body.image = imageUrls[0]
+    warnings.push('Atlas Cloud 聚合600+模型(Kling/Wan/Flux/Seedream等)；OpenAI 兼容；图像+视频+语音统一API')
+    return { endpoint, body, warnings, responseImagePath: 'data.0.url' }
+  }
+
+  function buildCometBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.cometapi.com/v1/images/generations'
+    const warnings: string[] = []
+    const body: any = { model: model || 'flux/dev', prompt, n: 1, size: `${width}x${height}` }
+    if (outputFormat === 'base64') body.response_format = 'b64_json'
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.num_images) body.n = extra.num_images
+    if (imageUrls.length > 0) body.image = imageUrls[0]
+    warnings.push('CometAPI 聚合500+模型(GPT/Midjourney/Flux/Gemini等)；OpenAI 兼容；按模型精准定价路由')
+    return { endpoint, body, warnings, responseImagePath: 'data.0.url' }
+  }
+
+  function buildWavespeedBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.wavespeed.ai/v1/images/generations'
+    const warnings: string[] = []
+    const body: any = { model: model || 'flux/dev', prompt, n: 1, size: `${width}x${height}` }
+    if (outputFormat === 'base64') body.response_format = 'b64_json'
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.num_images) body.n = extra.num_images
+    if (imageUrls.length > 0) body.image = imageUrls[0]
+    warnings.push('WaveSpeedAI 聚合平台；OpenAI 兼容；统一平台主打更优惠价格')
+    return { endpoint, body, warnings, responseImagePath: 'data.0.url' }
+  }
+
+  function buildQiniuBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://ai.qiniu.com/api/v1/images/generations'
+    const warnings: string[] = []
+    const body: any = { model: model || 'stable-diffusion', prompt, n: 1, size: `${width}x${height}` }
+    if (outputFormat === 'base64') body.response_format = 'b64_json'
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.negative_prompt = extra.negative_prompt
+    if (extra.num_images) body.n = extra.num_images
+    if (imageUrls.length > 0) body.image = imageUrls[0]
+    warnings.push('七牛云 AI 聚合平台，覆盖开源+闭源多种模型；OpenAI 兼容')
+    return { endpoint, body, warnings, responseImagePath: 'data.0.url' }
+  }
+
+  function buildFreepikBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.freepik.com/v1/images/generations'
+    const warnings: string[] = []
+    const body: any = { model: model || 'magnific', prompt, width, height, n: 1 }
+    if (outputFormat === 'base64') body.response_format = 'b64_json'
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.negative_prompt = extra.negative_prompt
+    if (extra.num_images) body.n = extra.num_images
+    if (imageUrls.length > 0) body.image = imageUrls[0]
+    warnings.push('Freepik Magnific API 图像生成+编辑；支持 AI 资源搜索与生成')
+    return { endpoint, body, warnings, responseImagePath: 'data.0.url' }
+  }
+
+  function buildKreaBody(api: ApiConfig, model: string, prompt: string, sizeStr: string, imageUrls: string[], outputFormat: string): BackendResult {
+    const { width, height } = parseSize(sizeStr)
+    const endpoint = api.endpoint || 'https://api.krea.ai/v1/images/generations'
+    const warnings: string[] = []
+    const body: any = { model: model || 'flux', prompt, width, height }
+    if (outputFormat === 'base64') body.response_format = 'b64_json'
+    let extra: any = {}
+    try { if (api.extraBody) extra = JSON.parse(api.extraBody) } catch {}
+    if (extra.negative_prompt) body.negative_prompt = extra.negative_prompt
+    if (extra.steps) body.steps = extra.steps
+    if (extra.seed !== undefined) body.seed = extra.seed
+    if (imageUrls.length > 0) body.image = imageUrls[0]
+    warnings.push('Krea AI 40+模型聚合；Flux/Imagen4/Ideogram3 等；支持图像/视频生成+编辑')
+    return { endpoint, body, warnings, responseImagePath: 'images.0.url' }
+  }
+
+  function isBuiltinBackend(api: ApiConfig): boolean {
+    return !!api.backend && api.backend !== 'custom'
+  }
+
   async function customGenerate(
     session: any,
     api: ApiConfig,
@@ -402,24 +1246,131 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     const model = modelOverride || cfg.model
     const size = api.defaultSize || cfg.imageSize
 
+    if (isBuiltinBackend(api)) {
+      const outputFormat = 'url'
+      const converters: Record<string, (a: ApiConfig, m: string, p: string, s: string, imgs: string[], fmt: string) => BackendResult> = {
+        agnes: buildAgnesBody,
+        openai: buildOpenAIBody,
+        stability: buildStabilityBody,
+        leonardo: buildLeonardoBody,
+        replicate: buildReplicateBody,
+        flux: buildFluxBody,
+        midjourney: buildMidjourneyBody,
+        getimg: buildGetimgBody,
+        ideogram: buildIdeogramBody,
+        venice: buildVeniceBody,
+        prodia: buildProdiaBody,
+        deepai: buildDeepAIBody,
+        recraft: buildRecraftBody,
+        imagen: buildImagenBody,
+        xai: buildXaiBody,
+        microsoft: buildMicrosoftBody,
+        firefly: buildFireflyBody,
+        luma: buildLumaBody,
+        zai: buildZaiBody,
+        amazon: buildAmazonBody,
+        baidu: buildBaiduBody,
+        aliyun: buildAliyunBody,
+        tencent: buildTencentBody,
+        seedream: buildSeedreamBody,
+        huawei: buildHuaweiBody,
+        xfyun: buildXfyunBody,
+        sense: buildSenseBody,
+        meitu: buildMeituBody,
+        minimax: buildMinimaxBody,
+        kuaishou: buildKuaishouBody,
+        stepfun: buildStepfunBody,
+        openrouter: buildOpenrouterBody,
+        together: buildTogetherBody,
+        fal: buildFalBody,
+        segmind: buildSegmindBody,
+        deepinfra: buildDeepinfraBody,
+        atlas: buildAtlasBody,
+        comet: buildCometBody,
+        wavespeed: buildWavespeedBody,
+        qiniu: buildQiniuBody,
+        freepik: buildFreepikBody,
+        krea: buildKreaBody,
+      }
+      const converter = converters[api.backend]
+      if (!converter) {
+        logger.error('不支持的后端类型:', api.backend)
+        await safeSend(session, cfg.messages.fail + '（不支持的后端类型）')
+        return
+      }
+
+      let result: BackendResult
+      try {
+        result = converter(api, model, prompt, size, imageUrls, outputFormat)
+      } catch (e) {
+        logger.error('后端转换器执行失败', e)
+        await safeSend(session, cfg.messages.fail + '（后端转换失败）')
+        return
+      }
+
+      if (debug) {
+        if (result.warnings.length > 0) logger.info(`[${api.backend}] 警告:`, result.warnings.join('; '))
+        logger.info(`[${api.backend}] 请求:`, result.endpoint, JSON.stringify(result.body, null, 2))
+      }
+
+      if (!validateEndpointUrl(result.endpoint)) {
+        logger.error('无效的API端点URL:', result.endpoint)
+        await safeSend(session, cfg.messages.fail + '（API端点配置无效）')
+        return
+      }
+
+      const resultHeaders = result.headers || api.headers || '{"Authorization":"Bearer {apiKey}","Content-Type":"application/json"}'
+      const headersVars: Record<string, any> = { apiKey: api.apiKey }
+      let headers: any
+      try {
+        headers = resolveTemplate(resultHeaders, headersVars)
+      } catch {
+        headers = { Authorization: `Bearer ${api.apiKey}`, 'Content-Type': 'application/json' }
+      }
+
+      const responsePath = result.responseImagePath || api.responseImagePath
+      const isAsyncBackend = api.backend === 'flux' || api.backend === 'midjourney' || api.backend === 'prodia'
+
+      try {
+        const postRes = await axios.post(result.endpoint, result.body, { headers, timeout: cfg.timeout })
+        if (debug) logger.info(`[${api.backend}] 提交响应:`, JSON.stringify(postRes.data, null, 2))
+
+        let finalData = postRes.data
+
+        if (isAsyncBackend) {
+          const taskId = postRes.data?.id || postRes.data?.taskId
+          if (!taskId) {
+            await safeSend(session, cfg.messages.fail + '（未获取到异步任务ID）')
+            return
+          }
+          const pollUrl = api.backend === 'midjourney'
+            ? (result.endpoint.replace('/imagine', '/fetch'))
+            : 'https://api.bfl.ai/v1/get_result'
+          if (debug) logger.info(`[${api.backend}] 开始轮询任务: ${taskId}`)
+          finalData = await pollForResult(pollUrl, taskId, headers, cfg.timeout)
+          if (debug) logger.info(`[${api.backend}] 轮询完成:`, JSON.stringify(finalData, null, 2))
+        }
+
+        const imgUrl = extractImageUrl(finalData, responsePath)
+        await handleImageResponse(session, imgUrl, finalData)
+      } catch (err) {
+        const reason = getErrorMessage(err)
+        logger.error(`[${api.backend}] API请求失败 [${reason}]`, err)
+        await safeSend(session, `${cfg.messages.fail} [${reason}]`)
+      } finally {
+        if (imageUrls.length > 0) deleteAllCachedFiles(imageUrls)
+      }
+      return
+    }
+
     const endpointTemplate = api.endpoint || api.baseUrl
     const headersTemplate = api.headers || '{"Authorization":"Bearer {apiKey}","Content-Type":"application/json"}'
-
     const bodyTemplate = imageUrls.length > 0 ? api.img2imgBody : api.txt2imgBody
-
     const endpoint = endpointTemplate.replace(/\{model\}/g, model)
-
-    const headersVars: Record<string, any> = { apiKey: api.apiKey }
-    const headers = resolveTemplate(headersTemplate, headersVars)
-
-    const bodyVars: Record<string, any> = {
-      model,
-      prompt,
-      size,
-    }
-    if (imageUrls.length > 0) {
-      bodyVars['__arr_image_urls'] = imageUrls
-    }
+    const headersVars2: Record<string, any> = { apiKey: api.apiKey }
+    const headers = resolveTemplate(headersTemplate, headersVars2)
+    const bodyVars: Record<string, any> = { model, prompt, size }
+    if (imageUrls.length > 0) bodyVars['__arr_image_urls'] = imageUrls
 
     let body: any
     try {
@@ -450,13 +1401,8 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     }
 
     try {
-      const res = await axios.post(endpoint, body, {
-        headers,
-        timeout: cfg.timeout,
-      })
-
+      const res = await axios.post(endpoint, body, { headers, timeout: cfg.timeout })
       if (debug) logger.info('自定义响应:', JSON.stringify(res.data, null, 2))
-
       const imgUrl = extractImageUrl(res.data, api.responseImagePath)
       await handleImageResponse(session, imgUrl, res.data)
     } catch (err) {
@@ -464,9 +1410,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       logger.error(`自定义API请求失败 [${reason}]`, err)
       await safeSend(session, `${cfg.messages.fail} [${reason}]`)
     } finally {
-      if (imageUrls.length > 0) {
-        deleteAllCachedFiles(imageUrls)
-      }
+      if (imageUrls.length > 0) deleteAllCachedFiles(imageUrls)
     }
   }
 
