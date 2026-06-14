@@ -14,106 +14,131 @@ const logger = new Logger('ai-image')
 
 type Infer<T> = T extends Schema<infer U> ? U : never
 
-export const Config = Schema.object({
-  debug: Schema.boolean().default(false).description('开启调试模式，输出完整请求日志'),
-  apiStrategy: Schema.union([
-    Schema.const('sequence').description('顺序模式'),
-    Schema.const('roundrobin').description('负载均衡模式'),
-  ]).default('roundrobin').description('API 调度策略'),
-  timeout: Schema.number().default(300000).description('接口请求超时时间（毫秒）'),
-  rateLimit: Schema.number().default(200).description('每小时调用次数限制'),
-  imgWaitTime: Schema.number().default(60).description('图生图等待图片超时时间（秒）'),
-  model: Schema.string().default('gpt-image-2').description('通用模型名称，文生图/图生图共用。'),
-  txt2imgModel: Schema.string().default('').description('文生图专用模型名称，留空则使用上方通用模型'),
-  img2imgModel: Schema.string().default('').description('图生图专用模型名称，留空则使用上方通用模型'),
-  imageSize: Schema.string().default('1024x1024').description('默认图片尺寸（格式：宽x高，如 1024x1024）'),
-  maxImages: Schema.number().default(5).description('图生图最大支持图片数量'),
-  imageSendMode: Schema.union([
-    Schema.const('image').description('仅发送图片'),
-    Schema.const('url').description('仅发送链接'),
-    Schema.const('both').description('发送图片和链接'),
-  ]).default('image').description('生成结果发送方式'),
-  enableForward: Schema.boolean().default(true).description('多图结果是否使用合并转发'),
-  apiList: Schema.array(Schema.object({
-    enable: Schema.boolean().default(true).description('是否启用此 API 端点'),
-    example: Schema.string().default(
-      JSON.stringify({
-        endpoint: 'https://api.openai.com/v1/chat/completions',
-        apiKey: 'sk-xxxx',
-        headers: { 'Authorization': 'Bearer {apiKey}', 'Content-Type': 'application/json' },
-        txt2imgBody: JSON.stringify({
-          model: '{model}',
-          messages: [{ role: 'user', content: '{prompt}' }]
-        }),
-        img2imgBody: JSON.stringify({
-          model: '{model}',
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'text', text: '{prompt}' },
-              `{{image_objects}}`
-            ]
-          }]
-        }),
-        responseImagePath: 'choices.0.message.content',
-        responseImageFormat: 'url'
-      }, null, 2)
-    ).description(
-      '完整的 API 请求范式 JSON。\n' +
-      '必须包含：endpoint, apiKey, headers, txt2imgBody, img2imgBody, responseImagePath, responseImageFormat。\n' +
-      '支持变量：{model}（模型名）、{prompt}（提示词）、{size}（尺寸）、{url}（图生图时第一张图片链接）、{{image_urls}}（图片 URL 数组）、{{image_objects}}（Chat Completions 风格图片对象列表）、{apiKey}（API密钥）。\n' +
-      '请根据 API 类型选用 {{image_urls}} 或 {{image_objects}}。'
-    ),
-  })).default([]).description('API 配置列表，支持多账号轮询负载均衡'),
+export const Config = Schema.intersect([
+  Schema.object({
+    debug: Schema.boolean().default(false).description('开启调试模式，输出完整请求日志'),
+    apiStrategy: Schema.union([
+      Schema.const('sequence').description('顺序模式'),
+      Schema.const('roundrobin').description('负载均衡模式'),
+    ]).default('roundrobin').description('API 调度策略'),
+    timeout: Schema.number().default(300000).description('接口请求超时时间（毫秒）'),
+    rateLimit: Schema.number().default(200).description('每小时调用次数限制'),
+    imgWaitTime: Schema.number().default(60).description('图生图等待图片超时时间（秒）'),
+    model: Schema.string().default('gpt-image-2').description('通用模型名称，文生图/图生图共用。'),
+    txt2imgModel: Schema.string().default('').description('文生图专用模型名称，留空则使用上方通用模型'),
+    img2imgModel: Schema.string().default('').description('图生图专用模型名称，留空则使用上方通用模型'),
+    imageSize: Schema.string().default('1024x1024').description('默认图片尺寸（格式：宽x高，如 1024x1024）'),
+    maxImages: Schema.number().default(5).description('图生图最大支持图片数量'),
+    imageSendMode: Schema.union([
+      Schema.const('image').description('仅发送图片'),
+      Schema.const('url').description('仅发送链接'),
+      Schema.const('both').description('发送图片和链接'),
+    ]).default('image').description('生成结果发送方式'),
+    enableForward: Schema.boolean().default(true).description('多图结果是否使用合并转发'),
+    enableTxt2Img: Schema.boolean().default(true).description('启用文生图功能'),
+    enableImg2Img: Schema.boolean().default(true).description('启用图生图功能'),
+    responseImageFormat: Schema.union([
+      Schema.const('url').description('URL 链接'),
+      Schema.const('pure_base64').description('纯 Base64'),
+      Schema.const('data_uri').description('Data URI'),
+    ]).default('url').description('图片数据格式'),
+  }).description('基本设置'),
 
-  enableTxt2Img: Schema.boolean().default(true).description('启用文生图功能'),
-  enableImg2Img: Schema.boolean().default(true).description('启用图生图功能'),
+  Schema.object({
+    apiList: Schema.array(
+      Schema.object({
+        enable: Schema.boolean().default(true).description('是否启用此 API 端点'),
+        example: Schema.string()
+          .role('textarea')
+          .default(JSON.stringify({
+            endpoint: 'https://api.openai.com/v1/chat/completions',
+            apiKey: 'sk-xxxx',
+            headers: {
+              'Authorization': 'Bearer {apiKey}',
+              'Content-Type': 'application/json'
+            },
+            txt2imgBody: {
+              model: '{model}',
+              messages: [
+                { role: 'user', content: '{prompt}' }
+              ]
+            },
+            img2imgBody: {
+              model: '{model}',
+              messages: [{
+                role: 'user',
+                content: [
+                  { type: 'text', text: '{prompt}' },
+                  '{{image_objects}}'
+                ]
+              }]
+            },
+            responseImagePath: 'choices.0.message.content'
+          }, null, 2))
+          .description(
+            '完整的 API 请求范式 JSON。\n' +
+            '必须包含：endpoint, apiKey, headers, txt2imgBody, img2imgBody, responseImagePath。\n' +
+            '支持变量：{model}（模型名）、{prompt}（提示词）、{size}（尺寸）、{url}（图生图时第一张图片链接）、{{image_urls}}（图片 URL 数组）、{{image_objects}}（Chat Completions 风格图片对象列表）、{apiKey}（API密钥）。\n' +
+            '请根据 API 类型选用 {{image_urls}} 或 {{image_objects}}。'
+          ),
+      })
+    ).default([]).description('API 配置列表，支持多账号轮询负载均衡'),
+  }).description('API 配置'),
 
-  command: Schema.string().default('draw').description('文生图触发指令'),
-  aliases: Schema.array(String).default([]).description('文生图指令的额外别名'),
+  Schema.object({
+    command: Schema.string().default('draw').description('文生图触发指令'),
+    aliases: Schema.array(String).default([]).description('文生图指令的额外别名'),
+    img2imgCommand: Schema.string().default('imgdraw').description('图生图触发指令'),
+    img2imgAliases: Schema.array(String).default([]).description('图生图指令的额外别名'),
+    redrawCommand: Schema.string().default('redraw').description('重绘指令'),
+    redrawAliases: Schema.array(String).default(['rd', '重绘']).description('重绘指令别名'),
+  }).description('指令设置'),
 
-  img2imgCommand: Schema.string().default('imgdraw').description('图生图触发指令'),
-  img2imgAliases: Schema.array(String).default([]).description('图生图指令的额外别名'),
+  Schema.object({
+    txt2imgPrompt: Schema.string().default('请严格遵循我的要求生成一张图片，不要询问或添加额外说明，直接输出图片。要求：{prompt}').description('文生图提示词模板。变量：{prompt}=用户输入的提示词'),
+    img2imgPrompt: Schema.string().default('图片链接：{url} 请严格根据以下指令对提供的图片进行编辑或重绘，不要询问，直接输出结果。\n指令：{prompt}').description('图生图提示词模板。变量：{url}=上传后的图片链接 {prompt}=用户输入的编辑指令'),
+  }).description('提示词模板'),
 
-  redrawCommand: Schema.string().default('redraw').description('重绘指令'),
-  redrawAliases: Schema.array(String).default(['rd', '重绘']).description('重绘指令别名'),
+  Schema.object({
+    blacklistAdmins: Schema.array(String).default([]).description('黑名单管理员的 QQ 号列表'),
+  }).description('权限管理'),
 
-  txt2imgPrompt: Schema.string().default('请严格遵循我的要求生成一张图片，不要询问或添加额外说明，直接输出图片。要求：{prompt}').description('文生图提示词模板。变量：{prompt}=用户输入的提示词'),
-  img2imgPrompt: Schema.string().default('图片链接：{url} 请严格根据以下指令对提供的图片进行编辑或重绘，不要询问，直接输出结果。\n指令：{prompt}').description('图生图提示词模板。变量：{url}=上传后的图片链接 {prompt}=用户输入的编辑指令'),
-
-  blacklistAdmins: Schema.array(String).default([]).description('黑名单管理员的 QQ 号列表'),
-
-  messages: Schema.object({
-    generating: Schema.string().default('生成中...').description('正在调用 API 生成图片时的提示'),
-    waitImage: Schema.string().default('请在{time}秒内发送需要编辑的图片').description('图生图等待用户上传图片的提示。变量：{time}=超时秒数'),
-    timeout: Schema.string().default('等待图片超时，已取消').description('图生图等待超时后的提示'),
-    empty: Schema.string().default('[提示] 请输入提示词').description('用户未输入提示词时的提示'),
-    noApi: Schema.string().default('[提示] 未配置可用API').description('没有可用 API 时的提示'),
-    fail: Schema.string().default('[提示] 生成失败').description('API 调用失败时的通用提示'),
-    modelTextOnly: Schema.string().default('[提示] 模型未生成图片，返回文字：{text}').description('模型返回了文本而非图片时的提示。变量：{text}=模型返回的文字内容'),
-    needAssets: Schema.string().default('[提示] 图生图需要正确配置 assets 服务（selfUrl 未正确设置或服务未启动）').description('assets 服务未配置或不可用时的提示'),
-    txt2imgDisabled: Schema.string().default('[提示] 文生图功能未启用').description('文生图功能被关闭时的提示'),
-    img2imgDisabled: Schema.string().default('[提示] 图生图功能未启用').description('图生图功能被关闭时的提示'),
-    rateLimit: Schema.string().default('[提示] 调用次数已达上限，请稍后再试').description('触发频率限制时的提示'),
-    alreadyWaiting: Schema.string().default('你已在等待发送图片，请直接发送图片或等待超时').description('用户重复发起图生图时的提示'),
-    multiImageReceived: Schema.string().default('已收到 {count} 张图片，可继续发送或输入"完成"开始生成').description('收到多张图片后的提示。变量：{count}=已收到的图片数量'),
-    multiImageLimit: Schema.string().default('已达到最大图片数量，自动开始生成').description('图片数量达到上限自动触发生成时的提示'),
-    noImageReceived: Schema.string().default('未发送任何图片').description('用户输入完成但未发送图片时的提示'),
-    blacklisted: Schema.string().default('[提示] 你已被加入黑名单，无法使用绘图功能').description('黑名单用户尝试使用时的提示'),
-    noPermission: Schema.string().default('[提示] 你没有权限管理黑名单').description('非管理员操作黑名单时的提示'),
-    blacklistAddSuccess: Schema.string().default('已将 {targets} 加入黑名单').description('添加黑名单成功时的提示。变量：{targets}=被加入的QQ号列表'),
-    blacklistRemoveSuccess: Schema.string().default('已将 {targets} 移出黑名单').description('移除黑名单成功时的提示。变量：{targets}=被移出的QQ号列表'),
-    blacklistAddFail: Schema.string().default('{targets} 已在黑名单中或无效').description('添加黑名单失败时的提示。变量：{targets}=操作失败的QQ号列表'),
-    blacklistRemoveFail: Schema.string().default('{targets} 不在黑名单中').description('移除黑名单失败时的提示。变量：{targets}=操作失败的QQ号列表'),
-    invalidUserId: Schema.string().default('无效的QQ号：{targets}').description('输入了无效QQ号时的提示。变量：{targets}=无效的QQ号列表'),
-    blacklistListEmpty: Schema.string().default('当前黑名单为空').description('黑名单为空时的提示'),
-    blacklistListTitle: Schema.string().default('当前黑名单：').description('查看黑名单列表时的标题'),
-    waitCancel: Schema.string().default('已取消等待，可以重新开始').description('用户取消图生图等待时的提示'),
-    waitHelp: Schema.string().default('发送图片继续，或输入"完成"开始生成，输入"取消"取消').description('等待图片时的帮助提示'),
-    noLastTask: Schema.string().default('没有上一次生成记录，无法重绘').description('重绘时无历史记录时的提示'),
-    redrawing: Schema.string().default('正在重绘...').description('重绘开始提示'),
-  }).description('所有提示文案的自定义配置，支持模板变量'),
-}).description('AI 绘图插件')
+  Schema.object({
+    messages: Schema.object({
+      generating: Schema.string().default('生成中...'),
+      waitImage: Schema.string().default('请在{time}秒内发送需要编辑的图片'),
+      timeout: Schema.string().default('等待图片超时，已取消'),
+      empty: Schema.string().default('[提示] 请输入提示词'),
+      noApi: Schema.string().default('[提示] 未配置可用API'),
+      fail: Schema.string().default('[提示] 生成失败'),
+      modelTextOnly: Schema.string().default('[提示] 模型未生成图片，返回文字：{text}'),
+      needAssets: Schema.string().default('[提示] 图生图需要正确配置 assets 服务（selfUrl 未正确设置或服务未启动）'),
+      txt2imgDisabled: Schema.string().default('[提示] 文生图功能未启用'),
+      img2imgDisabled: Schema.string().default('[提示] 图生图功能未启用'),
+      rateLimit: Schema.string().default('[提示] 调用次数已达上限，请稍后再试'),
+      alreadyWaiting: Schema.string().default('你已在等待发送图片，请直接发送图片或等待超时'),
+      multiImageReceived: Schema.string().default('已收到 {count} 张图片，可继续发送或输入"完成"开始生成'),
+      multiImageLimit: Schema.string().default('已达到最大图片数量，自动开始生成'),
+      noImageReceived: Schema.string().default('未发送任何图片'),
+      blacklisted: Schema.string().default('[提示] 你已被加入黑名单，无法使用绘图功能'),
+      noPermission: Schema.string().default('[提示] 你没有权限管理黑名单'),
+      blacklistAddSuccess: Schema.string().default('已将 {targets} 加入黑名单'),
+      blacklistRemoveSuccess: Schema.string().default('已将 {targets} 移出黑名单'),
+      blacklistAddFail: Schema.string().default('{targets} 已在黑名单中或无效'),
+      blacklistRemoveFail: Schema.string().default('{targets} 不在黑名单中'),
+      invalidUserId: Schema.string().default('无效的QQ号：{targets}'),
+      blacklistListEmpty: Schema.string().default('当前黑名单为空'),
+      blacklistListTitle: Schema.string().default('当前黑名单：'),
+      waitCancel: Schema.string().default('已取消等待，可以重新开始'),
+      waitHelp: Schema.string().default('发送图片继续，或输入"完成"开始生成，输入"取消"取消'),
+      noLastTask: Schema.string().default('没有上一次生成记录，无法重绘'),
+      redrawing: Schema.string().default('正在重绘...'),
+      redrawImg2Img: Schema.string().default('[提示] 重绘仅支持文生图任务，图生图任务请直接发起新的图生图指令'),
+      noContent: Schema.string().default('（未返回任何内容）').description('API 返回空结果时的追加提示'),
+      templateError: Schema.string().default('（模板配置错误）').description('请求体模板解析失败时的追加提示'),
+    }).description('所有提示文案的自定义配置，支持模板变量'),
+  }).description('消息文本'),
+])
 
 declare module 'koishi' {
   interface Tables {
@@ -139,18 +164,14 @@ interface LastTask {
   model: string
 }
 
-type ApiConfig = Infer<typeof Config>['apiList'][number]
-
 interface ParsedApi {
   enable: boolean
   endpoint: string
-  apiKey?: string
-  headers: any
+  headers: Record<string, string>
   txt2imgBody: string
   img2imgBody: string
   responseImagePath: string
-  responseImageFormat: 'url' | 'pure_base64' | 'data_uri'
-  extraBody?: any
+  responseImageUrlsPath: string
   method: string
 }
 
@@ -162,7 +183,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     if (fs.existsSync(loc)) {
       ctx.i18n.define('zh-CN', yaml.parse(fs.readFileSync(loc, 'utf8')))
     }
-  } catch {}
+  } catch { }
 
   const waitingMap = new Map<string, WaitingTask>()
   const lastTaskMap = new Map<string, LastTask>()
@@ -204,16 +225,22 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     try {
       const obj = JSON.parse(raw)
       if (!obj.endpoint) return null
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (obj.headers && typeof obj.headers === 'object') {
+        for (const [k, v] of Object.entries(obj.headers)) {
+          if (typeof v === 'string') {
+            headers[k] = v.replace(/\{apiKey\}/g, obj.apiKey || '')
+          }
+        }
+      }
       return {
         enable: true,
         endpoint: String(obj.endpoint),
-        apiKey: obj.apiKey ? String(obj.apiKey) : undefined,
-        headers: obj.headers || { 'Authorization': 'Bearer {apiKey}', 'Content-Type': 'application/json' },
+        headers,
         txt2imgBody: typeof obj.txt2imgBody === 'string' ? obj.txt2imgBody : JSON.stringify(obj.txt2imgBody),
         img2imgBody: typeof obj.img2imgBody === 'string' ? obj.img2imgBody : JSON.stringify(obj.img2imgBody),
-        responseImagePath: obj.responseImagePath || 'data.0.url',
-        responseImageFormat: obj.responseImageFormat || 'url',
-        extraBody: obj.extraBody || undefined,
+        responseImagePath: obj.responseImagePath || 'choices.0.message.content',
+        responseImageUrlsPath: obj.responseImageUrlsPath || '',
         method: (obj.method || 'POST').toUpperCase(),
       }
     } catch {
@@ -221,31 +248,32 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     }
   }
 
-  let cachedParsedApis: ParsedApi[] | null = null
+  let cachedApis: ParsedApi[] | null = null
   let cachedApiListKey = ''
 
   function getApi(): ParsedApi | null {
     const key = cfg.apiList.map(a => `${a.enable}|${a.example}`).join(',')
-    if (!cachedParsedApis || cachedApiListKey !== key) {
-      cachedParsedApis = []
-      for (const item of cfg.apiList) {
-        if (!item.enable) continue
-        const parsed = parseApiExample(item.example)
-        if (parsed) cachedParsedApis.push(parsed)
-      }
+    if (cachedApis === null || cachedApiListKey !== key) {
+      cachedApis = cfg.apiList
+        .filter(item => item.enable)
+        .map(item => parseApiExample(item.example))
+        .filter((api): api is ParsedApi => api !== null)
       cachedApiListKey = key
       apiRoundRobinIdx = 0
     }
-    if (!cachedParsedApis.length) return null
-    if (cfg.apiStrategy === 'sequence') return cachedParsedApis[0]
-    const api = cachedParsedApis[apiRoundRobinIdx % cachedParsedApis.length]
+    if (!cachedApis.length) return null
+    if (cfg.apiStrategy === 'sequence') return cachedApis[0]
+    const api = cachedApis[apiRoundRobinIdx % cachedApis.length]
     apiRoundRobinIdx++
     return api
   }
 
+  function escapeRegExp(str: string): string {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  }
+
   function resolveTemplate(template: string, vars: Record<string, any>): any {
     let result = template
-
     const directVars = ['image_urls', 'image_objects']
     for (const key of directVars) {
       if (key in vars && typeof vars[key] === 'string') {
@@ -254,7 +282,6 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
         delete vars[key]
       }
     }
-
     for (const [key, value] of Object.entries(vars)) {
       if (value === undefined || value === null) continue
       const strVal = JSON.stringify(value)
@@ -262,22 +289,6 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       result = result.replace(regex, () => strVal.slice(1, -1))
     }
     return JSON.parse(result)
-  }
-
-  function escapeRegExp(str: string): string {
-    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  }
-
-  function deepMerge(target: any, source: any): any {
-    if (source === null || source === undefined) return target
-    if (target === null || target === undefined) return source
-    if (Array.isArray(target) && Array.isArray(source)) return [...target, ...source]
-    if (typeof target !== 'object' || typeof source !== 'object') return source
-    const result = { ...target }
-    for (const key of Object.keys(source)) {
-      result[key] = deepMerge(target[key], source[key])
-    }
-    return result
   }
 
   function getValueByPath(obj: any, pathStr: string): any {
@@ -293,19 +304,40 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     return current
   }
 
-  function imageDataToSegment(raw: any, format: 'url' | 'pure_base64' | 'data_uri'): string | null {
-    if (raw === undefined || raw === null) return null
-    const str = String(raw).trim()
-    if (!str) return null
+  function extractImagesByPath(obj: any, pathStr: string): string[] {
+    if (!pathStr) return []
+    if (pathStr.includes('#')) {
+      const parts = pathStr.split('#')
+      if (parts.length !== 2) return []
+      const arrPath = parts[0].replace(/\.$/, '')
+      const itemPath = parts[1].replace(/^\./, '')
+      const arr = arrPath ? getValueByPath(obj, arrPath) : obj
+      if (!Array.isArray(arr)) return []
+      return arr.map(item => {
+        const val = itemPath ? getValueByPath(item, itemPath) : item
+        return val === undefined || val === null ? '' : String(val).trim()
+      }).filter(Boolean)
+    }
+    const val = getValueByPath(obj, pathStr)
+    if (Array.isArray(val)) return val.map(String).filter(Boolean)
+    if (val) return [String(val).trim()]
+    return []
+  }
 
+  function imageDataToSegment(raw: string, format: string): string | null {
+    const str = raw.trim()
+    if (!str) return null
     if (format === 'url') {
       return /^https?:\/\//.test(str) ? str : null
     }
     if (format === 'pure_base64') {
+      if (/^https?:\/\//.test(str)) return null
+      if (/^data:image\/[a-zA-Z]+;base64,/.test(str)) return str
       return `data:image/png;base64,${str}`
     }
     if (format === 'data_uri') {
       if (/^data:image\/[a-zA-Z]+;base64,/.test(str)) return str
+      if (/^https?:\/\//.test(str)) return null
       return `data:image/png;base64,${str}`
     }
     if (/^https?:\/\//.test(str)) return str
@@ -314,20 +346,18 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
   }
 
   function buildForwardMessage(imageUrls: string[], userId: string, nickname = '绘图结果') {
-    const nodes = imageUrls.map(url => {
-      return h('message', {}, h('author', { id: userId, name: nickname }), h('img', { src: url }))
-    })
+    const nodes = imageUrls.map(url => h('message', {}, h('author', { id: userId, name: nickname }), h('img', { src: url })))
     return h('message', { forward: true }, ...nodes)
   }
 
   async function sendSingleImage(session: any, url: string) {
     const mode = cfg.imageSendMode
     if (mode === 'image') {
-      await safeSend(session, h('img', { src: url }))
+      await safeSend(session, segment.image(url))
     } else if (mode === 'url') {
       await safeSend(session, url)
     } else if (mode === 'both') {
-      await safeSend(session, h('img', { src: url }))
+      await safeSend(session, segment.image(url))
       await safeSend(session, url)
     }
   }
@@ -337,12 +367,10 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       await safeSend(session, cfg.messages.fail + '（未生成任何图片）')
       return
     }
-
     if (imageUrls.length === 1) {
       await sendSingleImage(session, imageUrls[0])
       return
     }
-
     if (cfg.enableForward) {
       const forward = buildForwardMessage(imageUrls, session.userId, session.author?.nickname || session.username)
       await safeSend(session, forward)
@@ -362,15 +390,18 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     }
   }
 
-  async function handleImageResponse(session: any, responseData: any, api?: ParsedApi) {
-    const rawValue = getValueByPath(responseData, api?.responseImagePath || 'choices.0.message.content')
+  async function handleImageResponse(session: any, responseData: any, api: ParsedApi) {
     let imageUrls: string[] = []
-    if (Array.isArray(rawValue)) {
-      imageUrls = rawValue.map(item => String(item).trim()).filter(Boolean)
-    } else if (rawValue) {
-      const candidate = String(rawValue).trim()
-      if (candidate) imageUrls = [candidate]
+
+    if (api.responseImageUrlsPath) {
+      imageUrls = extractImagesByPath(responseData, api.responseImageUrlsPath)
     }
+    if (imageUrls.length === 0 && api.responseImagePath) {
+      imageUrls = extractImagesByPath(responseData, api.responseImagePath)
+    }
+
+    const format = cfg.responseImageFormat || 'url'
+    imageUrls = imageUrls.map(raw => imageDataToSegment(raw, format)).filter((url): url is string => url !== null)
 
     if (imageUrls.length > 0) {
       await sendImages(session, imageUrls)
@@ -382,7 +413,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       const msg = cfg.messages.modelTextOnly.replace('{text}', textContent.trim().slice(0, 500))
       await safeSend(session, msg)
     } else {
-      await safeSend(session, cfg.messages.fail + '（未返回任何内容）')
+      await safeSend(session, cfg.messages.fail + cfg.messages.noContent)
     }
   }
 
@@ -453,48 +484,42 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
   async function addToBlacklist(ids: string[]): Promise<{ success: string[], fail: string[] }> {
     const success: string[] = []
     const fail: string[] = []
-    for (const id of ids) {
-      if (!isValidQQ(id)) {
-        fail.push(id)
-        continue
-      }
+    const validIds = ids.filter(id => { if (isValidQQ(id)) return true; fail.push(id); return false })
+    if (validIds.length === 0) return { success, fail }
+    const existing = await ctx.database.get('ai_image_blacklist', { id: validIds })
+    const existingSet = new Set(existing.map((e: any) => e.id))
+    const toCreate = validIds.filter(id => !existingSet.has(id))
+    for (const id of toCreate) {
       try {
-        const exists = await ctx.database.get('ai_image_blacklist', { id })
-        if (exists.length === 0) {
-          await ctx.database.create('ai_image_blacklist', { id, createdAt: new Date() })
-          success.push(id)
-        } else {
-          fail.push(id)
-        }
+        await ctx.database.create('ai_image_blacklist', { id, createdAt: new Date() })
+        success.push(id)
       } catch (e) {
         logger.error('添加黑名单失败', e)
         fail.push(id)
       }
     }
+    for (const id of existing) { fail.push(id.id) }
     return { success, fail }
   }
 
   async function removeFromBlacklist(ids: string[]): Promise<{ success: string[], fail: string[] }> {
     const success: string[] = []
     const fail: string[] = []
-    for (const id of ids) {
-      if (!isValidQQ(id)) {
-        fail.push(id)
-        continue
-      }
+    const validIds = ids.filter(id => { if (isValidQQ(id)) return true; fail.push(id); return false })
+    if (validIds.length === 0) return { success, fail }
+    const existing = await ctx.database.get('ai_image_blacklist', { id: validIds })
+    const existingSet = new Set(existing.map((e: any) => e.id))
+    const toRemove = validIds.filter(id => existingSet.has(id))
+    for (const id of toRemove) {
       try {
-        const exists = await ctx.database.get('ai_image_blacklist', { id })
-        if (exists.length > 0) {
-          await ctx.database.remove('ai_image_blacklist', { id })
-          success.push(id)
-        } else {
-          fail.push(id)
-        }
+        await ctx.database.remove('ai_image_blacklist', { id })
+        success.push(id)
       } catch (e) {
         logger.error('移除黑名单失败', e)
         fail.push(id)
       }
     }
+    for (const id of validIds.filter(id => !existingSet.has(id))) { fail.push(id) }
     return { success, fail }
   }
 
@@ -507,31 +532,15 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
   ) {
     const model = modelOverride || cfg.model
     const size = cfg.imageSize
-
     const isImg2Img = imageUrls.length > 0
-    const endpoint = api.endpoint
-
     const bodyTemplate = isImg2Img ? api.img2imgBody : api.txt2imgBody
-
-    let headersObj = api.headers
-    if (typeof headersObj === 'string') {
-      try {
-        headersObj = JSON.parse(headersObj)
-      } catch {
-        headersObj = {}
-      }
-    }
-    if (api.apiKey) {
-      const headerStr = JSON.stringify(headersObj).replace(/\{apiKey\}/g, api.apiKey)
-      headersObj = JSON.parse(headerStr)
-    }
 
     const bodyVars: Record<string, any> = { model, prompt, size }
     if (isImg2Img && imageUrls.length > 0) {
       bodyVars['url'] = imageUrls[0]
       bodyVars['image_urls'] = JSON.stringify(imageUrls)
       bodyVars['image_objects'] = imageUrls
-        .map(url => `{ "type": "image_url", "image_url": { "url": "${url.replace(/"/g, '\\"')}" } }`)
+        .map(url => JSON.stringify({ type: 'image_url', image_url: { url } }))
         .join(', ')
     }
 
@@ -540,31 +549,27 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       body = resolveTemplate(bodyTemplate, bodyVars)
     } catch (e) {
       logger.error('请求体模板解析失败', e)
-      await safeSend(session, cfg.messages.fail + '（模板配置错误）')
+      await safeSend(session, cfg.messages.fail + cfg.messages.templateError)
       return
     }
 
-    if (api.extraBody) {
-      body = deepMerge(body, api.extraBody)
-    }
-
     if (debug) {
-      const safeBody = sanitizeForLog(body, api.apiKey)
-      const safeHeaders = sanitizeForLog(headersObj, api.apiKey)
-      logger.info('自定义请求:', endpoint, JSON.stringify(safeBody, null, 2), JSON.stringify(safeHeaders, null, 2))
+      const safeBody = sanitizeForLog(body, api.headers?.Authorization?.split(' ')[1] || '')
+      const safeHeaders = sanitizeForLog(api.headers, api.headers?.Authorization?.split(' ')[1] || '')
+      logger.info('API请求', api.endpoint, JSON.stringify(safeBody), JSON.stringify(safeHeaders))
     }
 
-    if (!validateEndpointUrl(endpoint)) {
-      logger.error('无效的API端点URL:', endpoint)
+    if (!validateEndpointUrl(api.endpoint)) {
+      logger.error('无效的API端点URL:', api.endpoint)
       await safeSend(session, cfg.messages.fail + '（API端点配置无效）')
       return
     }
 
     try {
       const config: any = {
-        url: endpoint,
+        url: api.endpoint,
         method: api.method,
-        headers: headersObj,
+        headers: api.headers,
         timeout: cfg.timeout,
       }
       if (api.method === 'GET') {
@@ -573,7 +578,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
         config.data = body
       }
       const res = await axios(config)
-      if (debug) logger.info('自定义响应:', JSON.stringify(sanitizeForLog(res.data, api.apiKey), null, 2))
+      if (debug) logger.info('API响应', JSON.stringify(sanitizeForLog(res.data, api.headers?.Authorization?.split(' ')[1] || '')))
 
       await handleImageResponse(session, res.data, api)
 
@@ -586,7 +591,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       })
     } catch (err) {
       const reason = getErrorMessage(err)
-      logger.error(`自定义API请求失败 [${reason}]`, err)
+      logger.error(`API请求失败 [${reason}]`, err)
       await safeSend(session, `${cfg.messages.fail} [${reason}]`)
     }
   }
@@ -596,16 +601,13 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       await safeSend(session, cfg.messages.rateLimit)
       return
     }
-
     const api = getApi()
     if (!api) {
       if (debug) logger.info('无可用API')
       await safeSend(session, cfg.messages.noApi)
       return
     }
-
     recordApiCall()
-
     return customGenerate(session, api, prompt, imageUrl ? [imageUrl] : [], modelOverride)
   }
 
@@ -614,16 +616,13 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       await safeSend(session, cfg.messages.rateLimit)
       return
     }
-
     const api = getApi()
     if (!api) {
       if (debug) logger.info('无可用API')
       await safeSend(session, cfg.messages.noApi)
       return
     }
-
     recordApiCall()
-
     return customGenerate(session, api, prompt, imageUrls, modelOverride)
   }
 
@@ -650,10 +649,10 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     return setTimeout(() => {
       waitingMap.delete(key)
       if (task.imageUrls.length > 0) {
-        safeSend(session, cfg.messages.generating).catch(() => {})
+        safeSend(session, cfg.messages.generating).catch(() => { })
         generateWithMultipleImages(session, task.prompt, task.imageUrls, cfg.img2imgModel || cfg.model)
       } else {
-        safeSend(session, cfg.messages.timeout).catch(() => {})
+        safeSend(session, cfg.messages.timeout).catch(() => { })
       }
     }, cfg.imgWaitTime * 1000)
   }
@@ -787,17 +786,14 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
 
       const userId = `${session.guildId || 'private'}-${session.userId}`
       const last = lastTaskMap.get(userId)
-      if (!last) {
-        return safeSend(session, cfg.messages.noLastTask)
+      if (!last) return safeSend(session, cfg.messages.noLastTask)
+
+      if (last.isImg2Img) {
+        return safeSend(session, cfg.messages.redrawImg2Img)
       }
 
       await safeSend(session, cfg.messages.redrawing)
-
-      if (last.isImg2Img) {
-        await generateWithMultipleImages(session, last.prompt, last.imageUrls, last.model)
-      } else {
-        await generate(session, last.prompt, undefined, last.model)
-      }
+      await generate(session, last.prompt, undefined, last.model)
     } catch (e) {
       logger.error('重绘命令异常', e)
       await safeSend(session, cfg.messages.fail)
@@ -811,7 +807,6 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     if (!cfg.blacklistAdmins.includes(session.userId)) {
       return safeSend(session, cfg.messages.noPermission)
     }
-
     try {
       const entries = await ctx.database.get('ai_image_blacklist', {})
       if (entries.length === 0) {
@@ -830,17 +825,14 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     if (!cfg.blacklistAdmins.includes(session.userId)) {
       return safeSend(session, cfg.messages.noPermission)
     }
-
     const ids = targets.map(t => t.trim()).filter(id => id.length > 0)
     if (ids.length === 0) {
       return safeSend(session, '请提供有效的QQ号')
     }
-
     const invalid = ids.filter(id => !isValidQQ(id))
     if (invalid.length > 0) {
       return safeSend(session, cfg.messages.invalidUserId.replace('{targets}', invalid.join(', ')))
     }
-
     const { success, fail } = await addToBlacklist(ids)
     if (success.length) {
       await safeSend(session, cfg.messages.blacklistAddSuccess.replace('{targets}', success.join(', ')))
@@ -855,17 +847,14 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     if (!cfg.blacklistAdmins.includes(session.userId)) {
       return safeSend(session, cfg.messages.noPermission)
     }
-
     const ids = targets.map(t => t.trim()).filter(id => id.length > 0)
     if (ids.length === 0) {
       return safeSend(session, '请提供有效的QQ号')
     }
-
     const invalid = ids.filter(id => !isValidQQ(id))
     if (invalid.length > 0) {
       return safeSend(session, cfg.messages.invalidUserId.replace('{targets}', invalid.join(', ')))
     }
-
     const { success, fail } = await removeFromBlacklist(ids)
     if (success.length) {
       await safeSend(session, cfg.messages.blacklistRemoveSuccess.replace('{targets}', success.join(', ')))

@@ -22,7 +22,8 @@ Image‑to‑image supports **multiple reference images** with configurable maxi
 | 命令 (Command)                     | 功能说明 (Description) |
 |------------------------------------|------------------------|
 | `draw <提示词>`                  | 文生图：根据提示词直接生成图片 |
-| `imgdraw <提示词>`               | 图生图：发送指令后在限定时间内上传参考图（可发送多张），输入“完成”或“done”结束收集并开始生成 |
+| `imgdraw <提示词>`               | 图生图：发送指令后在限定时间内上传参考图（可发送多张），输入"完成"或"done"结束收集并开始生成；支持直接在指令后附带图片链接，一键生成 |
+| `redraw` / `rd` / `重绘`         | 重绘：重新生成上一次的文生图结果 |
 | `blacklist list`                 | 查看当前黑名单（仅管理员） |
 | `blacklist add <QQ号> [QQ号 ...]`  | 将指定 QQ 号加入黑名单（仅管理员） |
 | `blacklist remove <QQ号> [QQ号 ...]` | 将指定 QQ 号移出黑名单（仅管理员） |
@@ -43,37 +44,38 @@ Image‑to‑image supports **multiple reference images** with configurable maxi
 
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
-| **基础设置** | | |
+| **基本设置** | | |
 | `debug` | 调试模式，输出完整请求/响应日志 | `false` |
 | `apiStrategy` | API 调度策略：`sequence`（顺序）/ `roundrobin`（轮询负载均衡） | `roundrobin` |
 | `timeout` | API 请求超时时间（毫秒） | `300000` |
 | `rateLimit` | 每小时调用次数上限 | `200` |
 | `imgWaitTime` | 图生图等待用户上传图片的超时秒数 | `60` |
-| **模型** | | |
 | `model` | 通用模型名称，文生图/图生图共用 | `gpt-image-2` |
 | `txt2imgModel` | 文生图专用模型，留空则使用通用模型 | (空) |
 | `img2imgModel` | 图生图专用模型，留空则使用通用模型 | (空) |
 | `imageSize` | 默认图片尺寸（宽x高） | `1024x1024` |
-| **发送设置** | | |
+| `maxImages` | 图生图最大支持图片数量 | `5` |
 | `imageSendMode` | 图片发送方式：`image`（仅图片）、`url`（仅链接）、`both`（图片+链接） | `image` |
 | `enableForward` | 多图结果是否使用合并转发 | `true` |
-| **API 列表** | 每个条目是一个完整的请求范式 JSON | `[]` |
+| `enableTxt2Img` | 启用文生图功能 | `true` |
+| `enableImg2Img` | 启用图生图功能 | `true` |
+| `responseImageFormat` | 图片数据格式：`url`（直链）、`pure_base64`（纯 Base64）、`data_uri`（Data URI） | `url` |
+| **API 配置** | 每个条目是一个完整的请求范式 JSON | `[]` |
 | `apiList[].enable` | 是否启用此 API | `true` |
 | `apiList[].example` | **（大文本框）** 请求范式 JSON，详见下方说明 | 见默认示例 |
-| **指令** | | |
-| `enableTxt2Img` | 启用文生图功能 | `true` |
+| **指令设置** | | |
 | `command` | 文生图触发指令 | `draw` |
 | `aliases` | 文生图指令别名 | `[]` |
-| `enableImg2Img` | 启用图生图功能 | `true` |
 | `img2imgCommand` | 图生图触发指令 | `imgdraw` |
 | `img2imgAliases` | 图生图指令别名 | `[]` |
-| `maxImages` | 图生图最大支持图片数量 | `5` |
+| `redrawCommand` | 重绘触发指令 | `redraw` |
+| `redrawAliases` | 重绘指令别名 | `['rd', '重绘']` |
 | **提示词模板** | | |
 | `txt2imgPrompt` | 文生图提示模板，变量 `{prompt}` | 见默认 |
 | `img2imgPrompt` | 图生图提示模板，变量 `{url}` `{prompt}` | 见默认 |
-| **黑名单** | | |
+| **权限管理** | | |
 | `blacklistAdmins` | 黑名单管理员 QQ 号列表 | `[]` |
-| **提示文案** | 所有提示文案均可自定义，支持模板变量 | 见配置页 |
+| **消息文本** | 所有提示文案均可自定义，支持模板变量 | 见配置页 |
 
 #### 请求范式 JSON (`example` 字段)
 
@@ -117,29 +119,30 @@ Image‑to‑image supports **multiple reference images** with configurable maxi
 | `timeout` | Request timeout (ms) | `300000` |
 | `rateLimit` | Hourly call limit | `200` |
 | `imgWaitTime` | Image upload wait timeout (seconds) | `60` |
-| **Models** | | |
 | `model` | General model name | `gpt-image-2` |
 | `txt2imgModel` | Text-to-image model override | (empty) |
 | `img2imgModel` | Image-to-image model override | (empty) |
 | `imageSize` | Default image size (WxH) | `1024x1024` |
-| **Send Settings** | | |
+| `maxImages` | Max reference images | `5` |
 | `imageSendMode` | Image send mode: `image`, `url`, `both` | `image` |
 | `enableForward` | Use forward message for multiple images | `true` |
-| **API List** | Each entry is a complete request template JSON | `[]` |
+| `enableTxt2Img` | Enable txt2img | `true` |
+| `enableImg2Img` | Enable img2img | `true` |
+| `responseImageFormat` | Image data format: `url`, `pure_base64`, `data_uri` | `url` |
+| **API Config** | Each entry is a complete request template JSON | `[]` |
 | `apiList[].enable` | Enable this API | `true` |
 | `apiList[].example` | **(Textarea)** Request template JSON, see details below | default example |
 | **Commands** | | |
-| `enableTxt2Img` | Enable txt2img | `true` |
 | `command` | Txt2img command | `draw` |
 | `aliases` | Command aliases | `[]` |
-| `enableImg2Img` | Enable img2img | `true` |
 | `img2imgCommand` | Img2img command | `imgdraw` |
 | `img2imgAliases` | Command aliases | `[]` |
-| `maxImages` | Max reference images | `5` |
+| `redrawCommand` | Redraw command | `redraw` |
+| `redrawAliases` | Redraw aliases | `['rd', '重绘']` |
 | **Prompts** | | |
 | `txt2imgPrompt` | Prompt template, var `{prompt}` | Chinese default |
 | `img2imgPrompt` | Prompt template, vars `{url}` `{prompt}` | Chinese default |
-| **Blacklist** | | |
+| **Permissions** | | |
 | `blacklistAdmins` | Admin QQ number list | `[]` |
 | **Messages** | All messages customizable with template vars | see schema |
 
