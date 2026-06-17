@@ -56,7 +56,7 @@ Image‑to‑image supports **multiple reference images** with configurable maxi
 | `enableForward` | 多图结果是否使用合并转发 | `true` |
 | `enableTxt2Img` | 启用文生图功能 | `true` |
 | `enableImg2Img` | 启用图生图功能 | `true` |
-| `responseImageFormat` | 全局默认图片数据格式：`url` / `pure_base64` / `data_uri` | `url` |
+| `responseImageFormat` | 全局默认图片数据格式：`url`（直链）/ `pure_base64`（Base64） | `url` |
 | **代理设置** | | |
 | `proxyEnabled` | 是否启用 HTTP/HTTPS 代理 | `false` |
 | `proxyProtocol` | 代理协议：`http` / `https` | `http` |
@@ -123,10 +123,10 @@ Image‑to‑image supports **multiple reference images** with configurable maxi
 **图片 URL 自动扫描**  
 所有模式下，当 `responseImagePath` 未命中时，插件会自动扫描响应 JSON 中**第一个 HTTP/HTTPS URL** 作为图片地址——无需为不同平台精确配置图片路径。  
 
-**Base64 / Data URI 处理说明**  
-- 当 `responseImageFormat` 设为 `pure_base64` 时，插件会从 `responseImagePath` 取出纯 Base64 字符串，自动添加 `data:image/png;base64,` 前缀后发送。  
-- 当设为 `data_uri` 时，插件会直接使用取出的完整 Data URI 或自动补全前缀。  
-- 如果设为 `url` 但取出的却是 Base64 数据，插件也会尝试自动补全并发送（即有一定的容错能力）。
+**Base64 处理说明**  
+- 当 `responseImageFormat` 设为 `pure_base64` 时，插件会自动下载 URL 图片并转为 Base64 发送。  
+- 如果 API 返回纯 Base64 字符串，自动添加 `data:image/xxx;base64,` 前缀。  
+- `url` 模式下检测到 Base64 数据也会自动补全前缀（容错处理）。
 
 ---
 
@@ -145,7 +145,7 @@ Image‑to‑image supports **multiple reference images** with configurable maxi
 | `enableForward` | Use forward message for multiple images | `true` |
 | `enableTxt2Img` | Enable txt2img | `true` |
 | `enableImg2Img` | Enable img2img | `true` |
-| `responseImageFormat` | Global default image data format: `url` / `pure_base64` / `data_uri` | `url` |
+| `responseImageFormat` | Global default image data format: `url` (direct) / `pure_base64` (Base64) | `url` |
 | **Proxy** | | |
 | `proxyEnabled` | Enable HTTP/HTTPS proxy | `false` |
 | `proxyProtocol` | Proxy protocol: `http` / `https` | `http` |
@@ -212,10 +212,10 @@ Image‑to‑image supports **multiple reference images** with configurable maxi
 **Auto URL scanning**  
 In all modes, when `responseImagePath` yields no match, the plugin auto-scans the response JSON for the **first HTTP/HTTPS URL** as the image address — no need to configure exact paths per platform.
 
-**Base64 / Data URI**  
-- `pure_base64`: takes raw Base64 from the specified path, prepends `data:image/png;base64,` before sending.  
-- `data_uri`: expects a full Data URI string, or auto-prefixes if missing.  
-- `url`: directly sends the image via HTTP link; if a Base64 string is detected, it will be auto-converted to a Data URI as a fallback.
+**Base64**  
+- `pure_base64`: auto-downloads URL images and converts to Base64 before sending.  
+- If the API returns raw Base64, prefixes `data:image/xxx;base64,` automatically.  
+- `url` mode auto-detects Base64 strings and prefixes them as a fallback.
 
 ---
 

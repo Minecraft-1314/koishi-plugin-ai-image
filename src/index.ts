@@ -33,7 +33,6 @@ export const Config = Schema.intersect([
     responseImageFormat: Schema.union([
       Schema.const('url').description('URL 链接'),
       Schema.const('pure_base64').description('纯 Base64'),
-      Schema.const('data_uri').description('Data URI'),
     ]).default('url').description('全局默认的图片数据格式（可被 API 条目覆盖）'),
   }).description('基本设置'),
 
@@ -61,7 +60,6 @@ export const Config = Schema.intersect([
       Schema.const('').description('跟随全局'),
       Schema.const('url').description('URL 链接'),
       Schema.const('pure_base64').description('纯 Base64'),
-      Schema.const('data_uri').description('Data URI'),
     ]).default('').description('图片数据格式（留空则跟随全局设置）'),
     txt2imgPrompt: Schema.string().default('').description('文生图提示词模板。变量：{prompt}（留空则直接使用用户输入）'),
     img2imgPrompt: Schema.string().default('').description('图生图提示词模板。变量：{url} {prompt}（留空则直接使用用户输入）'),
@@ -89,7 +87,6 @@ export const Config = Schema.intersect([
           Schema.const('').description('跟随全局'),
           Schema.const('url').description('URL 链接'),
           Schema.const('pure_base64').description('纯 Base64'),
-          Schema.const('data_uri').description('Data URI'),
         ]).default('').description('图片数据格式（留空则跟随全局设置）'),
         txt2imgPrompt: Schema.string().default('').description('文生图提示词模板。变量：{prompt}（留空则直接使用用户输入）'),
         img2imgPrompt: Schema.string().default('').description('图生图提示词模板。变量：{url} {prompt}（留空则直接使用用户输入）'),
@@ -274,12 +271,14 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     if (entry.apiKey) {
       headers['Authorization'] = `Bearer ${entry.apiKey}`
     }
-    // 合并自定义请求头
+    // 合并自定义请求头（替换 {apiKey} 占位符）
     if (entry.customHeaders) {
       try {
         const custom = JSON.parse(entry.customHeaders)
         if (custom && typeof custom === 'object') {
-          Object.assign(headers, custom)
+          for (const [k, v] of Object.entries(custom)) {
+            headers[k] = typeof v === 'string' ? v.replace(/\{apiKey\}/g, entry.apiKey || '') : String(v)
+          }
         }
       } catch {
         logger.warn('customHeaders JSON 解析失败，已忽略')
@@ -336,12 +335,14 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     if (cfg.apiKey) {
       headers['Authorization'] = `Bearer ${cfg.apiKey}`
     }
-    // 合并内置模式的自定义请求头
+    // 合并内置模式的自定义请求头（替换 {apiKey} 占位符）
     if (cfg.customHeaders) {
       try {
         const custom = JSON.parse(cfg.customHeaders)
         if (custom && typeof custom === 'object') {
-          Object.assign(headers, custom)
+          for (const [k, v] of Object.entries(custom)) {
+            headers[k] = typeof v === 'string' ? v.replace(/\{apiKey\}/g, cfg.apiKey || '') : String(v)
+          }
         }
       } catch {
         logger.warn('内置模式 customHeaders JSON 解析失败，已忽略')
@@ -468,7 +469,13 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     if (!obj) return null
     if (typeof obj === 'string') {
       const trimmed = obj.trim()
-      return /^https?:\/\//.test(trimmed) ? trimmed : null
+      if (/^https?:\/\//.test(trimmed)) return trimmed
+      // 从文本中提取 URL（Markdown 图片链接、HTML 等）
+      const match = trimmed.match(/https?:\/\/[^\s<>"')\]]+/)
+      if (match) {
+        return match[0].replace(/[.,;:'"]*$/, '')
+      }
+      return null
     }
     if (Array.isArray(obj)) {
       for (const item of obj) {
@@ -495,14 +502,37 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       if (/^data:image\/[a-zA-Z]+;base64,/.test(str)) return str
       return `data:image/png;base64,${str}`
     }
-    if (format === 'data_uri') {
-      if (/^data:image\/[a-zA-Z]+;base64,/.test(str)) return str
-      if (/^https?:\/\//.test(str)) return null
-      return `data:image/png;base64,${str}`
-    }
     if (/^https?:\/\//.test(str)) return str
     if (/^data:image\/[a-zA-Z]+;base64,/.test(str)) return str
     return `data:image/png;base64,${str}`
+  }
+
+  function getMimeType(url: string): string {
+    const ext = url.replace(/[?#].*$/, '').split('.').pop()?.toLowerCase() || 'png'
+    const mimeMap: Record<string, string> = {
+      png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+      gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp',
+      svg: 'image/svg+xml', ico: 'image/x-icon', tiff: 'image/tiff',
+      tif: 'image/tiff', avif: 'image/avif', heic: 'image/heic',
+      heif: 'image/heif',
+    }
+    return mimeMap[ext] || 'image/png'
+  }
+
+  async function downloadImageAsBase64(url: string): Promise<string | null> {
+    try {
+      const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 30000 })
+      const rawType = res.headers['content-type']
+      const contentType = (typeof rawType === 'string' ? rawType : String(rawType || ''))
+      const mime = /^image\/[a-zA-Z0-9.+-]+/.test(contentType)
+        ? contentType.split(';')[0].trim()
+        : getMimeType(url)
+      const base64 = Buffer.from(res.data).toString('base64')
+      return `data:${mime};base64,${base64}`
+    } catch (e) {
+      logger.warn('下载图片转换失败', url, e)
+      return null
+    }
   }
 
   function buildForwardMessage(imageUrls: string[], userId: string, nickname = '绘图结果') {
@@ -563,7 +593,18 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     }
 
     const format = api.responseImageFormat || cfg.responseImageFormat || 'url'
-    imageUrls = imageUrls.map(raw => imageDataToSegment(raw, format)).filter((url): url is string => url !== null)
+    const convertedUrls: string[] = []
+    for (const raw of imageUrls) {
+      const seg = imageDataToSegment(raw, format)
+      if (seg) {
+        convertedUrls.push(seg)
+      } else if (/^https?:\/\//.test(raw) && format !== 'url') {
+        // API 返回的是 URL，但用户选择了 base64/data_uri → 下载后转换
+        const downloaded = await downloadImageAsBase64(raw)
+        if (downloaded) convertedUrls.push(downloaded)
+      }
+    }
+    imageUrls = convertedUrls
 
     if (imageUrls.length > 0) {
       await sendImages(session, imageUrls)
@@ -783,6 +824,10 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       const reason = getErrorMessage(err)
       logger.error(`API请求失败 [${reason}]`, err)
       await safeSend(session, `${cfg.messages.fail} [${reason}]`)
+    } finally {
+      // 清理图生图等待缓存
+      const uid = `${session.guildId || 'private'}-${session.userId}`
+      waitingMap.delete(uid)
     }
   }
 
@@ -857,7 +902,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       if (text.length > 6000) return safeSend(session, '提示词过长，请限制在6000字符以内')
 
       const urlMatch = text.match(/(https?:\/\/[^\s]+)/)
-      const hasUrl = urlMatch && /\.(png|jpg|jpeg|gif|webp)(\?.*)?$/i.test(urlMatch[0])
+      const hasUrl = urlMatch && /\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?|avif|heic|heif)(\?.*)?$/i.test(urlMatch[0])
       const promptText = hasUrl ? text.replace(urlMatch![0], '').trim() : text
 
       if (!promptText) return safeSend(session, cfg.messages.empty)
