@@ -4,7 +4,7 @@ commands:
     usage: 输入提示词即可生成图片
   imgdraw:
     description: 图生图
-    usage: 输入提示词后发送图片，可发送多张，输入"完成"或"done"结束收集
+    usage: 输入提示词后发送图片，可发送多张；输入“完成”或“done”开始生成，输入“取消”或“cancel”放弃等待
   redraw:
     description: 重绘
     usage: 重新生成上一次的图片，无需再次输入提示词
@@ -28,19 +28,22 @@ messages:
   img2imgDisabled: 图生图功能未启用
   rateLimit: 调用次数已达上限，请稍后再试
   alreadyWaiting: 你已在等待发送图片，请直接发送图片或等待超时
-  multiImageReceived: 已收到 {count} 张图片，可继续发送或输入"完成"开始生成
+  multiImageReceived: 已收到 {count} 张图片，可继续发送或输入“完成”开始生成
   multiImageLimit: 已达到最大图片数量，自动开始生成
   noImageReceived: 未发送任何图片
   blacklisted: 你已被加入黑名单，无法使用绘图功能
   noPermission: 你没有权限管理黑名单
   blacklistAddSuccess: 已将 {targets} 加入黑名单
   blacklistRemoveSuccess: 已将 {targets} 移出黑名单
-  blacklistAddFail:  {targets} 已在黑名单中或无效
-  blacklistRemoveFail:  {targets} 不在黑名单中
-  invalidUserId:  无效的QQ号：{targets}
+  blacklistAddFail: '{targets} 已在黑名单中或无效'
+  blacklistRemoveFail: '{targets} 不在黑名单中'
+  invalidUserId: '无效的QQ号：{targets}'
   blacklistListEmpty: 当前黑名单为空
   blacklistListTitle: 当前黑名单：
   waitCancel: 已取消等待，可以重新开始
-  waitHelp: 发送图片继续，或输入“完成”开始生成，输入“取消”取消
+  waitHelp: 发送图片继续，或输入"完成"开始生成，输入"取消"取消
   noLastTask: 没有上一次生成记录，无法重绘
   redrawing: 正在重绘...
+  redrawImg2Img: '[提示] 重绘仅支持文生图任务，图生图任务请直接发起新的图生图指令'
+  noContent: （未返回任何内容）
+  templateError: （模板配置错误）

@@ -17,16 +17,9 @@ type Infer<T> = T extends Schema<infer U> ? U : never
 export const Config = Schema.intersect([
   Schema.object({
     debug: Schema.boolean().default(false).description('开启调试模式，输出完整请求日志'),
-    apiStrategy: Schema.union([
-      Schema.const('sequence').description('顺序模式'),
-      Schema.const('roundrobin').description('负载均衡模式'),
-    ]).default('roundrobin').description('API 调度策略'),
     timeout: Schema.number().default(300000).description('接口请求超时时间（毫秒）'),
     rateLimit: Schema.number().default(200).description('每小时调用次数限制'),
     imgWaitTime: Schema.number().default(60).description('图生图等待图片超时时间（秒）'),
-    model: Schema.string().default('gpt-image-2').description('通用模型名称，文生图/图生图共用。'),
-    txt2imgModel: Schema.string().default('').description('文生图专用模型名称，留空则使用上方通用模型'),
-    img2imgModel: Schema.string().default('').description('图生图专用模型名称，留空则使用上方通用模型'),
     imageSize: Schema.string().default('1024x1024').description('默认图片尺寸（格式：宽x高，如 1024x1024）'),
     maxImages: Schema.number().default(5).description('图生图最大支持图片数量'),
     imageSendMode: Schema.union([
@@ -41,11 +34,25 @@ export const Config = Schema.intersect([
       Schema.const('url').description('URL 链接'),
       Schema.const('pure_base64').description('纯 Base64'),
       Schema.const('data_uri').description('Data URI'),
-    ]).default('url').description('图片数据格式'),
+    ]).default('url').description('API 返回的图片数据格式'),
   }).description('基本设置'),
 
   Schema.object({
-    apiList: Schema.array(
+    useCustomApi: Schema.boolean().default(false).description('是否使用自定义 API 配置（开启后将使用下方的高级模板，否则使用内置 OpenAI 格式）'),
+    apiEndpoint: Schema.string().default('https://api.openai.com/v1/chat/completions').description('API 端点地址（内置模式）'),
+    apiKey: Schema.string().role('secret').default('').description('API 密钥（内置模式）'),
+    txt2imgModel: Schema.string().default('gpt-image-2').description('文生图模型名称（内置模式优先，也用于自定义模板中的 {model} 变量）'),
+    img2imgModel: Schema.string().default('gpt-image-2').description('图生图模型名称（留空则使用文生图模型）'),
+    txt2imgPrompt: Schema.string().default('请严格遵循我的要求生成一张图片，不要询问或添加额外说明，直接输出图片。要求：{prompt}').description('文生图提示词模板。变量：{prompt}=用户输入的提示词'),
+    img2imgPrompt: Schema.string().default('图片链接：{url} 请严格根据以下指令对提供的图片进行编辑或重绘，不要询问，直接输出结果。\n指令：{prompt}').description('图生图提示词模板。变量：{url}=上传后的图片链接 {prompt}=用户输入的编辑指令'),
+  }).description('内置 API 设置（当未使用自定义模板时生效）'),
+
+  Schema.object({
+    apiStrategy: Schema.union([
+      Schema.const('sequence').description('顺序模式'),
+      Schema.const('roundrobin').description('负载均衡模式'),
+    ]).default('roundrobin').description('API 调度策略（仅自定义多配置时有效）'),
+    customApiList: Schema.array(
       Schema.object({
         enable: Schema.boolean().default(true).description('是否启用此 API 端点'),
         example: Schema.string()
@@ -75,15 +82,10 @@ export const Config = Schema.intersect([
             },
             responseImagePath: 'choices.0.message.content'
           }, null, 2))
-          .description(
-            '完整的 API 请求范式 JSON。\n' +
-            '必须包含：endpoint, apiKey, headers, txt2imgBody, img2imgBody, responseImagePath。\n' +
-            '支持变量：{model}（模型名）、{prompt}（提示词）、{size}（尺寸）、{url}（图生图时第一张图片链接）、{{image_urls}}（图片 URL 数组）、{{image_objects}}（Chat Completions 风格图片对象列表）、{apiKey}（API密钥）。\n' +
-            '请根据 API 类型选用 {{image_urls}} 或 {{image_objects}}。'
-          ),
+          .description('完整的 API 请求范式 JSON。\n支持变量：{model}、{prompt}、{size}、{apiKey}，以及数组占位符 {{image_urls}}、{{image_objects}}。\n注意：{{image_objects}} 在 JSON 中必须作为字符串值填写，插件会自动转换为对象数组。'),
       })
-    ).default([]).description('API 配置列表，支持多账号轮询负载均衡'),
-  }).description('API 配置'),
+    ).default([]).description('自定义 API 配置列表（仅当上方“使用自定义 API 配置”开启时生效）'),
+  }).description('自定义 API 配置（高级）'),
 
   Schema.object({
     command: Schema.string().default('draw').description('文生图触发指令'),
@@ -93,11 +95,6 @@ export const Config = Schema.intersect([
     redrawCommand: Schema.string().default('redraw').description('重绘指令'),
     redrawAliases: Schema.array(String).default(['rd', '重绘']).description('重绘指令别名'),
   }).description('指令设置'),
-
-  Schema.object({
-    txt2imgPrompt: Schema.string().default('请严格遵循我的要求生成一张图片，不要询问或添加额外说明，直接输出图片。要求：{prompt}').description('文生图提示词模板。变量：{prompt}=用户输入的提示词'),
-    img2imgPrompt: Schema.string().default('图片链接：{url} 请严格根据以下指令对提供的图片进行编辑或重绘，不要询问，直接输出结果。\n指令：{prompt}').description('图生图提示词模板。变量：{url}=上传后的图片链接 {prompt}=用户输入的编辑指令'),
-  }).description('提示词模板'),
 
   Schema.object({
     blacklistAdmins: Schema.array(String).default([]).description('黑名单管理员的 QQ 号列表'),
@@ -117,7 +114,7 @@ export const Config = Schema.intersect([
       img2imgDisabled: Schema.string().default('[提示] 图生图功能未启用'),
       rateLimit: Schema.string().default('[提示] 调用次数已达上限，请稍后再试'),
       alreadyWaiting: Schema.string().default('你已在等待发送图片，请直接发送图片或等待超时'),
-      multiImageReceived: Schema.string().default('已收到 {count} 张图片，可继续发送或输入"完成"开始生成'),
+      multiImageReceived: Schema.string().default('已收到 {count} 张图片，可继续发送或输入“完成”开始生成'),
       multiImageLimit: Schema.string().default('已达到最大图片数量，自动开始生成'),
       noImageReceived: Schema.string().default('未发送任何图片'),
       blacklisted: Schema.string().default('[提示] 你已被加入黑名单，无法使用绘图功能'),
@@ -130,7 +127,7 @@ export const Config = Schema.intersect([
       blacklistListEmpty: Schema.string().default('当前黑名单为空'),
       blacklistListTitle: Schema.string().default('当前黑名单：'),
       waitCancel: Schema.string().default('已取消等待，可以重新开始'),
-      waitHelp: Schema.string().default('发送图片继续，或输入"完成"开始生成，输入"取消"取消'),
+      waitHelp: Schema.string().default('发送图片继续，或输入“完成”开始生成，输入“取消”取消'),
       noLastTask: Schema.string().default('没有上一次生成记录，无法重绘'),
       redrawing: Schema.string().default('正在重绘...'),
       redrawImg2Img: Schema.string().default('[提示] 重绘仅支持文生图任务，图生图任务请直接发起新的图生图指令'),
@@ -165,11 +162,10 @@ interface LastTask {
 }
 
 interface ParsedApi {
-  enable: boolean
   endpoint: string
   headers: Record<string, string>
-  txt2imgBody: string
-  img2imgBody: string
+  txt2imgBody: any
+  img2imgBody: any
   responseImagePath: string
   responseImageUrlsPath: string
   method: string
@@ -221,7 +217,40 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     apiCallTimestamps.push(Date.now())
   }
 
-  function parseApiExample(raw: string): ParsedApi | null {
+  const BUILTIN_TXT2IMG_BODY = {
+    model: '{model}',
+    messages: [
+      { role: 'user', content: '{prompt}' }
+    ]
+  }
+
+  const BUILTIN_IMG2IMG_BODY = {
+    model: '{model}',
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text', text: '{prompt}' },
+        '{{image_objects}}'
+      ]
+    }]
+  }
+
+  function buildBuiltinApi(): ParsedApi {
+    return {
+      endpoint: cfg.apiEndpoint,
+      headers: {
+        'Authorization': `Bearer ${cfg.apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      txt2imgBody: BUILTIN_TXT2IMG_BODY,
+      img2imgBody: BUILTIN_IMG2IMG_BODY,
+      responseImagePath: 'choices.0.message.content',
+      responseImageUrlsPath: '',
+      method: 'POST'
+    }
+  }
+
+  function parseCustomApiExample(raw: string): ParsedApi | null {
     try {
       const obj = JSON.parse(raw)
       if (!obj.endpoint) return null
@@ -234,11 +263,10 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
         }
       }
       return {
-        enable: true,
         endpoint: String(obj.endpoint),
         headers,
-        txt2imgBody: typeof obj.txt2imgBody === 'string' ? obj.txt2imgBody : JSON.stringify(obj.txt2imgBody),
-        img2imgBody: typeof obj.img2imgBody === 'string' ? obj.img2imgBody : JSON.stringify(obj.img2imgBody),
+        txt2imgBody: typeof obj.txt2imgBody === 'object' ? obj.txt2imgBody : JSON.parse(obj.txt2imgBody || '{}'),
+        img2imgBody: typeof obj.img2imgBody === 'object' ? obj.img2imgBody : JSON.parse(obj.img2imgBody || '{}'),
         responseImagePath: obj.responseImagePath || 'choices.0.message.content',
         responseImageUrlsPath: obj.responseImageUrlsPath || '',
         method: (obj.method || 'POST').toUpperCase(),
@@ -248,47 +276,83 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     }
   }
 
-  let cachedApis: ParsedApi[] | null = null
-  let cachedApiListKey = ''
+  let cachedCustomApis: ParsedApi[] | null = null
+  let cachedCustomApiListKey = ''
 
-  function getApi(): ParsedApi | null {
-    const key = cfg.apiList.map(a => `${a.enable}|${a.example}`).join(',')
-    if (cachedApis === null || cachedApiListKey !== key) {
-      cachedApis = cfg.apiList
+  function getCustomApis(): ParsedApi[] {
+    if (!cfg.useCustomApi) return []
+    const key = cfg.customApiList.map(a => `${a.enable}|${a.example}`).join(',')
+    if (cachedCustomApis === null || cachedCustomApiListKey !== key) {
+      cachedCustomApis = cfg.customApiList
         .filter(item => item.enable)
-        .map(item => parseApiExample(item.example))
+        .map(item => parseCustomApiExample(item.example))
         .filter((api): api is ParsedApi => api !== null)
-      cachedApiListKey = key
+      cachedCustomApiListKey = key
       apiRoundRobinIdx = 0
     }
-    if (!cachedApis.length) return null
-    if (cfg.apiStrategy === 'sequence') return cachedApis[0]
-    const api = cachedApis[apiRoundRobinIdx % cachedApis.length]
-    apiRoundRobinIdx++
-    return api
+    return cachedCustomApis
   }
 
-  function escapeRegExp(str: string): string {
-    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  function getApi(): ParsedApi | null {
+    if (cfg.useCustomApi) {
+      const apis = getCustomApis()
+      if (apis.length === 0) return null
+      if (cfg.apiStrategy === 'sequence') return apis[0]
+      const api = apis[apiRoundRobinIdx % apis.length]
+      apiRoundRobinIdx++
+      return api
+    } else {
+      if (!cfg.apiKey) return null
+      return buildBuiltinApi()
+    }
   }
 
-  function resolveTemplate(template: string, vars: Record<string, any>): any {
-    let result = template
-    const directVars = ['image_urls', 'image_objects']
-    for (const key of directVars) {
-      if (key in vars && typeof vars[key] === 'string') {
-        const regex = new RegExp(`\\{\\{${escapeRegExp(key)}\\}\\}`, 'g')
-        result = result.replace(regex, vars[key] as string)
-        delete vars[key]
+  function deepReplace(obj: any, placeholder: string, replacement: any): any {
+    if (obj === placeholder) return replacement
+    if (Array.isArray(obj)) {
+      return obj.map(item => deepReplace(item, placeholder, replacement))
+    }
+    if (obj && typeof obj === 'object') {
+      const newObj: any = {}
+      for (const key in obj) {
+        newObj[key] = deepReplace(obj[key], placeholder, replacement)
       }
+      return newObj
     }
+    return obj
+  }
+
+  function resolveTemplate(template: any, vars: Record<string, any>): any {
+    const jsonStr = JSON.stringify(template)
+    let processed = jsonStr
+
+    const placeholders: { token: string, value: any }[] = []
+
+    if (vars.image_objects) {
+      const token = `__IMG_OBJ_${Math.random().toString(36).substring(2)}__`
+      placeholders.push({ token, value: vars.image_objects })
+      processed = processed.replace(/"{{image_objects}}"/g, `"${token}"`)
+      processed = processed.replace(/{{image_objects}}/g, token)
+    }
+    if (vars.image_urls) {
+      const token = `__IMG_URLS_${Math.random().toString(36).substring(2)}__`
+      placeholders.push({ token, value: vars.image_urls })
+      processed = processed.replace(/"{{image_urls}}"/g, `"${token}"`)
+      processed = processed.replace(/{{image_urls}}/g, token)
+    }
+
     for (const [key, value] of Object.entries(vars)) {
+      if (key === 'image_objects' || key === 'image_urls') continue
       if (value === undefined || value === null) continue
-      const strVal = JSON.stringify(value)
-      const regex = new RegExp(`\\{${escapeRegExp(key)}\\}`, 'g')
-      result = result.replace(regex, () => strVal.slice(1, -1))
+      const regex = new RegExp(`\\{${key}\\}`, 'g')
+      processed = processed.replace(regex, JSON.stringify(String(value)).slice(1, -1))
     }
-    return JSON.parse(result)
+
+    let result = JSON.parse(processed)
+    for (const { token, value } of placeholders) {
+      result = deepReplace(result, token, value)
+    }
+    return result
   }
 
   function getValueByPath(obj: any, pathStr: string): any {
@@ -374,11 +438,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     if (cfg.enableForward) {
       const forward = buildForwardMessage(imageUrls, session.userId, session.author?.nickname || session.username)
       await safeSend(session, forward)
-      if (cfg.imageSendMode === 'both') {
-        for (const url of imageUrls) {
-          await safeSend(session, url)
-        }
-      } else if (cfg.imageSendMode === 'url') {
+      if (cfg.imageSendMode === 'both' || cfg.imageSendMode === 'url') {
         for (const url of imageUrls) {
           await safeSend(session, url)
         }
@@ -456,11 +516,11 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     return '未知错误'
   }
 
-  function sanitizeForLog(obj: any, apiKey?: string): any {
-    if (!apiKey) return obj
+  function sanitizeForLog(obj: any, sensitive?: string): any {
+    if (!sensitive) return obj
     try {
       const str = JSON.stringify(obj)
-      const masked = str.replace(new RegExp(escapeRegExp(apiKey), 'g'), '***')
+      const masked = str.split(sensitive).join('***')
       return JSON.parse(masked)
     } catch {
       return obj
@@ -498,7 +558,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
         fail.push(id)
       }
     }
-    for (const id of existing) { fail.push(id.id) }
+    for (const entry of existing) { fail.push(entry.id) }
     return { success, fail }
   }
 
@@ -530,7 +590,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     imageUrls: string[] = [],
     modelOverride?: string
   ) {
-    const model = modelOverride || cfg.model
+    const model = modelOverride || cfg.txt2imgModel
     const size = cfg.imageSize
     const isImg2Img = imageUrls.length > 0
     const bodyTemplate = isImg2Img ? api.img2imgBody : api.txt2imgBody
@@ -538,10 +598,11 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     const bodyVars: Record<string, any> = { model, prompt, size }
     if (isImg2Img && imageUrls.length > 0) {
       bodyVars['url'] = imageUrls[0]
-      bodyVars['image_urls'] = JSON.stringify(imageUrls)
-      bodyVars['image_objects'] = imageUrls
-        .map(url => JSON.stringify({ type: 'image_url', image_url: { url } }))
-        .join(', ')
+      bodyVars['image_urls'] = imageUrls
+      bodyVars['image_objects'] = imageUrls.map(url => ({
+        type: 'image_url',
+        image_url: { url }
+      }))
     }
 
     let body: any
@@ -553,9 +614,13 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       return
     }
 
+    const sensitive = cfg.useCustomApi
+      ? (api.headers?.Authorization?.split(' ')[1] || '')
+      : cfg.apiKey
+
     if (debug) {
-      const safeBody = sanitizeForLog(body, api.headers?.Authorization?.split(' ')[1] || '')
-      const safeHeaders = sanitizeForLog(api.headers, api.headers?.Authorization?.split(' ')[1] || '')
+      const safeBody = sanitizeForLog(body, sensitive)
+      const safeHeaders = sanitizeForLog(api.headers, sensitive)
       logger.info('API请求', api.endpoint, JSON.stringify(safeBody), JSON.stringify(safeHeaders))
     }
 
@@ -578,7 +643,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
         config.data = body
       }
       const res = await axios(config)
-      if (debug) logger.info('API响应', JSON.stringify(sanitizeForLog(res.data, api.headers?.Authorization?.split(' ')[1] || '')))
+      if (debug) logger.info('API响应', JSON.stringify(sanitizeForLog(res.data, sensitive)))
 
       await handleImageResponse(session, res.data, api)
 
@@ -635,9 +700,10 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       if (!cfg.enableTxt2Img) return safeSend(session, cfg.messages.txt2imgDisabled)
       const prompt = (raw || '').trim()
       if (!prompt) return safeSend(session, cfg.messages.empty)
+      if (prompt.length > 6000) return safeSend(session, '提示词过长，请限制在6000字符以内')
       await safeSend(session, cfg.messages.generating)
       const finalPrompt = cfg.txt2imgPrompt.replace('{prompt}', prompt)
-      const model = cfg.txt2imgModel || cfg.model
+      const model = cfg.txt2imgModel
       await generate(session, finalPrompt, undefined, model)
     } catch (e) {
       logger.error('文生图命令异常', e)
@@ -650,7 +716,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       waitingMap.delete(key)
       if (task.imageUrls.length > 0) {
         safeSend(session, cfg.messages.generating).catch(() => { })
-        generateWithMultipleImages(session, task.prompt, task.imageUrls, cfg.img2imgModel || cfg.model)
+        generateWithMultipleImages(session, task.prompt, task.imageUrls, cfg.img2imgModel || cfg.txt2imgModel)
       } else {
         safeSend(session, cfg.messages.timeout).catch(() => { })
       }
@@ -667,6 +733,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
 
       const text = (raw || '').trim()
       if (!text) return safeSend(session, cfg.messages.empty)
+      if (text.length > 6000) return safeSend(session, '提示词过长，请限制在6000字符以内')
 
       const urlMatch = text.match(/(https?:\/\/[^\s]+)/)
       const hasUrl = urlMatch && /\.(png|jpg|jpeg|gif|webp)(\?.*)?$/i.test(urlMatch[0])
@@ -680,7 +747,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
         const finalPrompt = cfg.img2imgPrompt
           .replace('{url}', imageUrl)
           .replace('{prompt}', promptText)
-        await generateWithMultipleImages(session, finalPrompt, [imageUrl], cfg.img2imgModel || cfg.model)
+        await generateWithMultipleImages(session, finalPrompt, [imageUrl], cfg.img2imgModel || cfg.txt2imgModel)
         return
       }
 
@@ -738,7 +805,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
           clearTimeout(task.timer)
           waitingMap.delete(key)
           await safeSend(session, cfg.messages.generating)
-          await generateWithMultipleImages(session, task.prompt, task.imageUrls, cfg.img2imgModel || cfg.model)
+          await generateWithMultipleImages(session, task.prompt, task.imageUrls, cfg.img2imgModel || cfg.txt2imgModel)
           return
         }
 
@@ -754,7 +821,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
         waitingMap.delete(key)
         if (task.imageUrls.length > 0) {
           await safeSend(session, cfg.messages.generating)
-          await generateWithMultipleImages(session, task.prompt, task.imageUrls, cfg.img2imgModel || cfg.model)
+          await generateWithMultipleImages(session, task.prompt, task.imageUrls, cfg.img2imgModel || cfg.txt2imgModel)
         } else {
           await safeSend(session, cfg.messages.noImageReceived)
         }

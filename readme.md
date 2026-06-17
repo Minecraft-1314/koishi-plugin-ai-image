@@ -22,7 +22,7 @@ Image‑to‑image supports **multiple reference images** with configurable maxi
 | 命令 (Command)                     | 功能说明 (Description) |
 |------------------------------------|------------------------|
 | `draw <提示词>`                  | 文生图：根据提示词直接生成图片 |
-| `imgdraw <提示词>`               | 图生图：发送指令后在限定时间内上传参考图（可发送多张），输入"完成"或"done"结束收集并开始生成；支持直接在指令后附带图片链接，一键生成 |
+| `imgdraw <提示词>`               | 图生图：发送指令后在限定时间内上传参考图（可发送多张），输入“完成”或“done”开始生成，输入“取消”或“cancel”放弃等待；支持直接在指令后附带图片链接，一键生成 |
 | `redraw` / `rd` / `重绘`         | 重绘：重新生成上一次的文生图结果 |
 | `blacklist list`                 | 查看当前黑名单（仅管理员） |
 | `blacklist add <QQ号> [QQ号 ...]`  | 将指定 QQ 号加入黑名单（仅管理员） |
@@ -33,7 +33,8 @@ Image‑to‑image supports **multiple reference images** with configurable maxi
 | Command                             | Description |
 |-------------------------------------|-------------|
 | `draw <prompt>`                   | Text-to-image: Generate an image from the prompt |
-| `imgdraw <prompt>`                | Image-to-image: Send the command, then upload one or more reference images within the time limit. Send "done" or "完成" to finish collecting and start generation |
+| `imgdraw <prompt>`                | Image-to-image: Send the command, then upload one or more reference images within the time limit. Send "done" or "完成" to start generation, send "cancel" or "取消" to abort |
+| `redraw` / `rd` / `重绘`         | Redraw: Re-generate the last text-to-image result |
 | `blacklist list`                  | Show current blacklist (admin only) |
 | `blacklist add <QQ_number> [QQ_number ...]` | Add QQ number(s) to blacklist (admin only) |
 | `blacklist remove <QQ_number> [QQ_number ...]` | Remove QQ number(s) from blacklist (admin only) |
@@ -103,8 +104,8 @@ Image‑to‑image supports **multiple reference images** with configurable maxi
 - `{apiKey}`：API 密钥，仅用于 `headers` 字段  
 
 **Base64 / Data URI 处理说明**  
-- 当 `responseImageFormat` 设为 `base64` 时，插件会从 `responseImagePath` 取出纯 Base64 字符串，自动添加 `data:image/png;base64,` 前缀后发送。  
-- 当设为 `database64` 时，插件会直接使用取出的完整 Data URI 或自动补全前缀。  
+- 当 `responseImageFormat` 设为 `pure_base64` 时，插件会从 `responseImagePath` 取出纯 Base64 字符串，自动添加 `data:image/png;base64,` 前缀后发送。  
+- 当设为 `data_uri` 时，插件会直接使用取出的完整 Data URI 或自动补全前缀。  
 - 如果设为 `url` 但取出的却是 Base64 数据，插件也会尝试自动补全并发送（即有一定的容错能力）。
 
 ---
@@ -162,11 +163,18 @@ This is a **complete JSON object** that defines how to call the API. Supported f
 | `extraBody` | Extra JSON fields deep-merged into the final body | empty |
 | `method` | HTTP method, default POST | `POST` |
 
-**Variable placeholders** are replaced at runtime. Use `{{image_urls}}` for URL arrays, `{{image_objects}}` for Chat Completions image objects.
+**Variable placeholders**  
+- `{model}` — Model name (from global or per-mode config)  
+- `{prompt}` — Processed user prompt after template expansion  
+- `{size}` — Image size (from `imageSize` config)  
+- `{{image_urls}}` — URL array for DALL-E style APIs  
+- `{{image_objects}}` — Chat Completions image object list for OpenAI Chat API  
+- `{url}` — First image URL (string) for img2img  
+- `{apiKey}` — API key, used only in `headers`
 
 **Base64 / Data URI**  
-- `base64`: takes raw Base64 from the specified path, prepends `data:image/png;base64,` before sending.  
-- `database64`: expects a full Data URI string, or auto-prefixes if missing.  
+- `pure_base64`: takes raw Base64 from the specified path, prepends `data:image/png;base64,` before sending.  
+- `data_uri`: expects a full Data URI string, or auto-prefixes if missing.  
 - `url`: directly sends the image via HTTP link; if a Base64 string is detected, it will be auto-converted to a Data URI as a fallback.
 
 ---
@@ -184,7 +192,6 @@ This is a **complete JSON object** that defines how to call the API. Supported f
   "responseImagePath": "data.0.url",
   "responseImageFormat": "url"
 }
-```
 
 ### OpenAI Chat Completions（图片对象列表）
 ```json
