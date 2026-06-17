@@ -51,11 +51,29 @@ export const Config = Schema.intersect([
   }).description('代理设置'),
 
   Schema.object({
+    useCustomApi: Schema.boolean().default(false).description('是否使用自定义 API 配置（开启后下方自定义列表生效）'),
+    apiEndpoint: Schema.string().default('https://api.openai.com/v1/chat/completions').description('API 端点地址'),
+    apiKey: Schema.string().role('secret').default('').description('API 密钥'),
+    model: Schema.string().default('gpt-image-2').description('模型名称'),
+    img2imgModel: Schema.string().default('').description('图生图专用模型名称（留空则使用上方模型）'),
+    imageSize: Schema.string().default('').description('图片尺寸（留空则使用全局默认）'),
+    responseImageFormat: Schema.union([
+      Schema.const('').description('跟随全局'),
+      Schema.const('url').description('URL 链接'),
+      Schema.const('pure_base64').description('纯 Base64'),
+      Schema.const('data_uri').description('Data URI'),
+    ]).default('').description('图片数据格式（留空则跟随全局设置）'),
+    txt2imgPrompt: Schema.string().default('').description('文生图提示词模板。变量：{prompt}（留空则直接使用用户输入）'),
+    img2imgPrompt: Schema.string().default('').description('图生图提示词模板。变量：{url} {prompt}（留空则直接使用用户输入）'),
+    customHeaders: Schema.string().role('textarea').default('{}').description('自定义请求头 JSON 对象（合并到默认请求头）'),
+  }).description('内置 API 设置'),
+
+  Schema.object({
     apiStrategy: Schema.union([
       Schema.const('sequence').description('顺序模式'),
       Schema.const('roundrobin').description('负载均衡模式'),
-    ]).default('roundrobin').description('API 调度策略（多个 API 条目时生效）'),
-    apiList: Schema.array(
+    ]).default('roundrobin').description('API 调度策略'),
+    customApiList: Schema.array(
       Schema.object({
         enable: Schema.boolean().default(true).description('是否启用此 API'),
         adapterType: Schema.union([
@@ -64,7 +82,7 @@ export const Config = Schema.intersect([
         ]).default('chat').description('接口类型'),
         endpoint: Schema.string().default('https://api.openai.com/v1/chat/completions').description('API 端点地址'),
         apiKey: Schema.string().role('secret').default('').description('API 密钥'),
-        model: Schema.string().default('gpt-image-2').description('模型名称（用于请求体 {model} 变量）'),
+        model: Schema.string().default('gpt-image-2').description('模型名称'),
         img2imgModel: Schema.string().default('').description('图生图专用模型名称（留空则使用上方模型）'),
         imageSize: Schema.string().default('').description('图片尺寸（留空则使用全局默认）'),
         responseImageFormat: Schema.union([
@@ -75,14 +93,22 @@ export const Config = Schema.intersect([
         ]).default('').description('图片数据格式（留空则跟随全局设置）'),
         txt2imgPrompt: Schema.string().default('').description('文生图提示词模板。变量：{prompt}（留空则直接使用用户输入）'),
         img2imgPrompt: Schema.string().default('').description('图生图提示词模板。变量：{url} {prompt}（留空则直接使用用户输入）'),
-        customHeaders: Schema.string().role('textarea').default('{}').description('自定义请求头 JSON 对象，会合并到默认请求头中（如 {"X-Custom-Header":"value"}）'),
-        bodyTemplate: Schema.string().role('textarea').default('').description('自定义请求体 JSON 模板（高级选项，留空使用内置格式）。\n支持变量：{model}、{prompt}、{size}，占位符：{{image_urls}}、{{image_objects}}'),
+        customHeaders: Schema.string().role('textarea')
+          .default('{"Authorization":"Bearer {apiKey}","Content-Type":"application/json"}')
+          .description('自定义请求头 JSON 对象（合并到默认请求头），支持 {apiKey} 变量'),
+        bodyTemplate: Schema.string().role('textarea')
+          .default(JSON.stringify({
+            txt2imgBody: { model: '{model}', messages: [{ role: 'user', content: '{prompt}' }] },
+            img2imgBody: { model: '{model}', messages: [{ role: 'user', content: [{ type: 'text', text: '{prompt}' }, '{{image_objects}}'] }] },
+            responseImagePath: 'choices.0.message.content'
+          }, null, 2))
+          .description('自定义请求体 JSON 模板（高级，留空使用内置格式）。\n支持变量：{model}、{prompt}、{size}，占位符：{{image_urls}}、{{image_objects}}'),
       })
-    ).default([]).description('API 配置列表（为空时使用内置 OpenAI 默认配置）'),
-  }).description('API 配置'),
+    ).default([]).description('自定义 API 配置列表（仅当"使用自定义 API 配置"开启时生效）'),
+  }).description('自定义 API 配置'),
 
   Schema.object({
-    blacklistAdmins: Schema.array(String).default([]).description('黑名单管理员的 QQ 号列表'),
+    blacklistAdmins: Schema.array(String).default([]).description('黑名单管理员的 QQ 号列表（填入QQ号即可获得黑名单管理权限，支持多个管理员）'),
   }).description('权限管理'),
 
   Schema.object({
@@ -240,7 +266,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     image_urls: '{{image_urls}}'
   }
 
-  function parseApiEntry(entry: typeof cfg.apiList[number]): ParsedApi | null {
+  function parseApiEntry(entry: typeof cfg.customApiList[number]): ParsedApi | null {
     if (!entry.endpoint) return null
     const headers: Record<string, string> = {
       'Content-Type': 'application/json'
@@ -303,41 +329,58 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     }
   }
 
-  function buildDefaultApi(): ParsedApi {
+  function buildBuiltinApi(): ParsedApi {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json'
+    }
+    if (cfg.apiKey) {
+      headers['Authorization'] = `Bearer ${cfg.apiKey}`
+    }
+    // 合并内置模式的自定义请求头
+    if (cfg.customHeaders) {
+      try {
+        const custom = JSON.parse(cfg.customHeaders)
+        if (custom && typeof custom === 'object') {
+          Object.assign(headers, custom)
+        }
+      } catch {
+        logger.warn('内置模式 customHeaders JSON 解析失败，已忽略')
+      }
+    }
     return {
-      endpoint: 'https://api.openai.com/v1/chat/completions',
-      headers: {
-        'Authorization': 'Bearer ',
-        'Content-Type': 'application/json'
-      },
+      endpoint: cfg.apiEndpoint || 'https://api.openai.com/v1/chat/completions',
+      headers,
       txt2imgBody: BUILTIN_CHAT_TXT2IMG,
       img2imgBody: BUILTIN_CHAT_IMG2IMG,
       responseImagePath: 'choices.0.message.content',
       responseImageUrlsPath: '',
       method: 'POST',
       adapterType: 'chat',
-      responseImageFormat: '',
-      imageSize: cfg.imageSize,
-      txt2imgPrompt: '',
-      img2imgPrompt: '',
-      model: 'gpt-image-2',
-      img2imgModel: '',
+      responseImageFormat: cfg.responseImageFormat || '',
+      imageSize: cfg.imageSize || cfg.imageSize,
+      txt2imgPrompt: cfg.txt2imgPrompt || '',
+      img2imgPrompt: cfg.img2imgPrompt || '',
+      model: cfg.model || 'gpt-image-2',
+      img2imgModel: cfg.img2imgModel || '',
     }
   }
 
   function getApi(): ParsedApi | null {
-    const entries = cfg.apiList.filter((e: any) => e.enable)
-    if (entries.length === 0) {
-      return buildDefaultApi()
+    if (cfg.useCustomApi) {
+      const entries = cfg.customApiList.filter((e: any) => e.enable)
+      if (entries.length === 0) return null
+      const apis = entries
+        .map((e: any) => parseApiEntry(e))
+        .filter((a): a is ParsedApi => a !== null)
+      if (apis.length === 0) return null
+      if (cfg.apiStrategy === 'sequence') return apis[0]
+      const api = apis[apiRoundRobinIdx % apis.length]
+      apiRoundRobinIdx++
+      return api
+    } else {
+      if (!cfg.apiEndpoint && !cfg.apiKey) return null
+      return buildBuiltinApi()
     }
-    const apis = entries
-      .map((e: any) => parseApiEntry(e))
-      .filter((a): a is ParsedApi => a !== null)
-    if (apis.length === 0) return null
-    if (cfg.apiStrategy === 'sequence') return apis[0]
-    const api = apis[apiRoundRobinIdx % apis.length]
-    apiRoundRobinIdx++
-    return api
   }
 
   function deepReplace(obj: any, placeholder: string, replacement: any): any {

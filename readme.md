@@ -65,20 +65,31 @@ Image‑to‑image supports **multiple reference images** with configurable maxi
 | `proxyAuth` | 代理是否需要认证 | `false` |
 | `proxyUsername` | 代理用户名 | (空) |
 | `proxyPassword` | 代理密码 | (空) |
-| **API 配置** | 每个条目独立配置，支持多 API 负载均衡 | `[]` |
-| `apiList[].enable` | 是否启用此 API | `true` |
-| `apiList[].adapterType` | 接口类型：`chat`（OpenAI 消息格式）/ `flat`（扁平格式） | `chat` |
-| `apiList[].endpoint` | API 端点地址 | `https://api.openai.com/v1/chat/completions` |
-| `apiList[].apiKey` | API 密钥 | (空) |
-| `apiList[].model` | 模型名称 | `gpt-image-2` |
-| `apiList[].img2imgModel` | 图生图专用模型（留空使用上方模型） | (空) |
-| `apiList[].imageSize` | 图片尺寸（留空使用全局默认） | (空) |
-| `apiList[].responseImageFormat` | 图片数据格式（留空跟随全局） | (空) |
-| `apiList[].txt2imgPrompt` | 文生图提示词模板（留空直接使用用户输入） | (空) |
-| `apiList[].img2imgPrompt` | 图生图提示词模板（留空直接使用用户输入） | (空) |
-| `apiList[].customHeaders` | 自定义请求头 JSON 对象，合并到默认请求头中 | `{}` |
-| `apiList[].bodyTemplate` | 自定义请求体 JSON 模板（高级，留空使用内置格式） | (空) |
-| `apiStrategy` | API 调度策略：`sequence`（顺序）/ `roundrobin`（轮询负载均衡） | `roundrobin` |
+| **内置 API 设置** | 简单模式，使用 OpenAI 格式 | |
+| `useCustomApi` | 是否启用自定义 API（开启后下方自定义列表生效） | `false` |
+| `apiEndpoint` | API 端点地址 | `https://api.openai.com/v1/chat/completions` |
+| `apiKey` | API 密钥 | (空) |
+| `model` | 模型名称 | `gpt-image-2` |
+| `img2imgModel` | 图生图专用模型（留空使用上方模型） | (空) |
+| `imageSize` | 图片尺寸（留空使用全局默认） | (空) |
+| `responseImageFormat` | 图片数据格式（留空跟随全局） | (空) |
+| `txt2imgPrompt` | 文生图提示词模板（留空直接使用用户输入） | (空) |
+| `img2imgPrompt` | 图生图提示词模板（留空直接使用用户输入） | (空) |
+| `customHeaders` | 自定义请求头 JSON（合并到默认请求头） | `{}` |
+| **自定义 API 配置** | 高级模式，每个条目独立配置 | `[]` |
+| `apiStrategy` | API 调度策略：`sequence` / `roundrobin` | `roundrobin` |
+| `customApiList[].enable` | 是否启用此 API | `true` |
+| `customApiList[].adapterType` | 接口类型：`chat` / `flat` | `chat` |
+| `customApiList[].endpoint` | API 端点地址 | `https://api.openai.com/v1/chat/completions` |
+| `customApiList[].apiKey` | API 密钥 | (空) |
+| `customApiList[].model` | 模型名称 | `gpt-image-2` |
+| `customApiList[].img2imgModel` | 图生图专用模型（留空使用上方模型） | (空) |
+| `customApiList[].imageSize` | 图片尺寸（留空使用全局默认） | (空) |
+| `customApiList[].responseImageFormat` | 图片数据格式（留空跟随全局） | (空) |
+| `customApiList[].txt2imgPrompt` | 文生图提示词模板 | (空) |
+| `customApiList[].img2imgPrompt` | 图生图提示词模板 | (空) |
+| `customApiList[].customHeaders` | 自定义请求头 JSON，支持 `{apiKey}` 变量 | 见预设 |
+| `customApiList[].bodyTemplate` | 自定义请求体 JSON（高级，留空使用内置） | 见预设 |
 | **权限管理** | | |
 | `blacklistAdmins` | 黑名单管理员 QQ 号列表 | `[]` |
 | **消息文本** | 所有提示文案均可自定义，支持模板变量 | 见配置页 |
@@ -143,20 +154,31 @@ Image‑to‑image supports **multiple reference images** with configurable maxi
 | `proxyAuth` | Proxy requires authentication | `false` |
 | `proxyUsername` | Proxy username | (empty) |
 | `proxyPassword` | Proxy password | (empty) |
-| **API Config** | Each entry independently configurable, supports multi-API load balancing | `[]` |
-| `apiList[].enable` | Enable this API | `true` |
-| `apiList[].adapterType` | Adapter type: `chat` (OpenAI format) / `flat` (flat format) | `chat` |
-| `apiList[].endpoint` | API endpoint URL | `https://api.openai.com/v1/chat/completions` |
-| `apiList[].apiKey` | API key | (empty) |
-| `apiList[].model` | Model name | `gpt-image-2` |
-| `apiList[].img2imgModel` | Image-to-image model (falls back to model) | (empty) |
-| `apiList[].imageSize` | Image size (falls back to global) | (empty) |
-| `apiList[].responseImageFormat` | Image data format (falls back to global) | (empty) |
-| `apiList[].txt2imgPrompt` | Prompt template (empty = raw user input) | (empty) |
-| `apiList[].img2imgPrompt` | Prompt template (empty = raw user input) | (empty) |
-| `apiList[].customHeaders` | Custom headers JSON object, merged into default headers | `{}` |
-| `apiList[].bodyTemplate` | Custom request body JSON template (advanced, empty = built-in) | (empty) |
+| **Built-in API** | Simple mode, uses OpenAI format | |
+| `useCustomApi` | Enable custom API (below list takes effect) | `false` |
+| `apiEndpoint` | API endpoint URL | `https://api.openai.com/v1/chat/completions` |
+| `apiKey` | API key | (empty) |
+| `model` | Model name | `gpt-image-2` |
+| `img2imgModel` | Image-to-image model (falls back to model) | (empty) |
+| `imageSize` | Image size (falls back to global) | (empty) |
+| `responseImageFormat` | Image data format (falls back to global) | (empty) |
+| `txt2imgPrompt` | Prompt template (empty = raw user input) | (empty) |
+| `img2imgPrompt` | Prompt template (empty = raw user input) | (empty) |
+| `customHeaders` | Custom headers JSON (merged into default) | `{}` |
+| **Custom API Config** | Advanced mode, per-entry configuration | `[]` |
 | `apiStrategy` | API strategy: `sequence` / `roundrobin` | `roundrobin` |
+| `customApiList[].enable` | Enable this API | `true` |
+| `customApiList[].adapterType` | Adapter type: `chat` / `flat` | `chat` |
+| `customApiList[].endpoint` | API endpoint URL | `https://api.openai.com/v1/chat/completions` |
+| `customApiList[].apiKey` | API key | (empty) |
+| `customApiList[].model` | Model name | `gpt-image-2` |
+| `customApiList[].img2imgModel` | Image-to-image model (falls back to model) | (empty) |
+| `customApiList[].imageSize` | Image size (falls back to global) | (empty) |
+| `customApiList[].responseImageFormat` | Image data format (falls back to global) | (empty) |
+| `customApiList[].txt2imgPrompt` | Prompt template | (empty) |
+| `customApiList[].img2imgPrompt` | Prompt template | (empty) |
+| `customApiList[].customHeaders` | Custom headers JSON, supports `{apiKey}` | preset |
+| `customApiList[].bodyTemplate` | Custom request body JSON (advanced) | preset |
 | **Permissions** | | |
 | `blacklistAdmins` | Admin QQ number list | `[]` |
 | **Messages** | All messages customizable with template vars | see schema |
