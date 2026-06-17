@@ -20,7 +20,7 @@ export const Config = Schema.intersect([
     timeout: Schema.number().default(300000).description('接口请求超时时间（毫秒）'),
     rateLimit: Schema.number().default(200).description('每小时调用次数限制'),
     imgWaitTime: Schema.number().default(60).description('图生图等待图片超时时间（秒）'),
-    imageSize: Schema.string().default('1024x1024').description('默认图片尺寸（格式：宽x高，如 1024x1024）'),
+    imageSize: Schema.string().default('1024x1024').description('全局默认图片尺寸（格式：宽x高），可被 API 条目覆盖'),
     maxImages: Schema.number().default(5).description('图生图最大支持图片数量'),
     imageSendMode: Schema.union([
       Schema.const('image').description('仅发送图片'),
@@ -34,68 +34,52 @@ export const Config = Schema.intersect([
       Schema.const('url').description('URL 链接'),
       Schema.const('pure_base64').description('纯 Base64'),
       Schema.const('data_uri').description('Data URI'),
-    ]).default('url').description('API 返回的图片数据格式'),
+    ]).default('url').description('全局默认的图片数据格式（可被 API 条目覆盖）'),
   }).description('基本设置'),
 
   Schema.object({
-    useCustomApi: Schema.boolean().default(false).description('是否使用自定义 API 配置（开启后将使用下方的高级模板，否则使用内置 OpenAI 格式）'),
-    apiEndpoint: Schema.string().default('https://api.openai.com/v1/chat/completions').description('API 端点地址（内置模式）'),
-    apiKey: Schema.string().role('secret').default('').description('API 密钥（内置模式）'),
-    txt2imgModel: Schema.string().default('gpt-image-2').description('文生图模型名称（内置模式优先，也用于自定义模板中的 {model} 变量）'),
-    img2imgModel: Schema.string().default('gpt-image-2').description('图生图模型名称（留空则使用文生图模型）'),
-    txt2imgPrompt: Schema.string().default('请严格遵循我的要求生成一张图片，不要询问或添加额外说明，直接输出图片。要求：{prompt}').description('文生图提示词模板。变量：{prompt}=用户输入的提示词'),
-    img2imgPrompt: Schema.string().default('图片链接：{url} 请严格根据以下指令对提供的图片进行编辑或重绘，不要询问，直接输出结果。\n指令：{prompt}').description('图生图提示词模板。变量：{url}=上传后的图片链接 {prompt}=用户输入的编辑指令'),
-  }).description('内置 API 设置（当未使用自定义模板时生效）'),
+    proxyEnabled: Schema.boolean().default(false).description('是否启用 HTTP/HTTPS 代理'),
+    proxyProtocol: Schema.union([
+      Schema.const('http').description('HTTP'),
+      Schema.const('https').description('HTTPS'),
+    ]).default('http').description('代理协议'),
+    proxyHost: Schema.string().default('').description('代理地址'),
+    proxyPort: Schema.number().default(8080).description('代理端口'),
+    proxyAuth: Schema.boolean().default(false).description('代理是否需要认证'),
+    proxyUsername: Schema.string().default('').description('代理用户名'),
+    proxyPassword: Schema.string().role('secret').default('').description('代理密码'),
+  }).description('代理设置'),
 
   Schema.object({
     apiStrategy: Schema.union([
       Schema.const('sequence').description('顺序模式'),
       Schema.const('roundrobin').description('负载均衡模式'),
-    ]).default('roundrobin').description('API 调度策略（仅自定义多配置时有效）'),
-    customApiList: Schema.array(
+    ]).default('roundrobin').description('API 调度策略（多个 API 条目时生效）'),
+    apiList: Schema.array(
       Schema.object({
-        enable: Schema.boolean().default(true).description('是否启用此 API 端点'),
-        example: Schema.string()
-          .role('textarea')
-          .default(JSON.stringify({
-            endpoint: 'https://api.openai.com/v1/chat/completions',
-            adapterType: 'chat',
-            apiKey: 'sk-xxxx',
-            headers: {
-              'Authorization': 'Bearer {apiKey}',
-              'Content-Type': 'application/json'
-            },
-            txt2imgBody: {
-              model: '{model}',
-              messages: [
-                { role: 'user', content: '{prompt}' }
-              ]
-            },
-            img2imgBody: {
-              model: '{model}',
-              messages: [{
-                role: 'user',
-                content: [
-                  { type: 'text', text: '{prompt}' },
-                  '{{image_objects}}'
-                ]
-              }]
-            },
-            responseImagePath: 'choices.0.message.content'
-          }, null, 2))
-          .description('完整的 API 请求范式 JSON。\n支持变量：{model}、{prompt}、{size}、{apiKey}，以及数组占位符 {{image_urls}}、{{image_objects}}。\nadapterType：chat（OpenAI 消息格式，默认）/ flat（原生绘图扁平格式）。\n注意：{{image_objects}} 在 JSON 中必须作为字符串值填写，插件会自动转换为对象数组。'),
+        enable: Schema.boolean().default(true).description('是否启用此 API'),
+        adapterType: Schema.union([
+          Schema.const('chat').description('OpenAI 消息格式'),
+          Schema.const('flat').description('原生绘图扁平格式'),
+        ]).default('chat').description('接口类型'),
+        endpoint: Schema.string().default('https://api.openai.com/v1/chat/completions').description('API 端点地址'),
+        apiKey: Schema.string().role('secret').default('').description('API 密钥'),
+        model: Schema.string().default('gpt-image-2').description('模型名称（用于请求体 {model} 变量）'),
+        img2imgModel: Schema.string().default('').description('图生图专用模型名称（留空则使用上方模型）'),
+        imageSize: Schema.string().default('').description('图片尺寸（留空则使用全局默认）'),
+        responseImageFormat: Schema.union([
+          Schema.const('').description('跟随全局'),
+          Schema.const('url').description('URL 链接'),
+          Schema.const('pure_base64').description('纯 Base64'),
+          Schema.const('data_uri').description('Data URI'),
+        ]).default('').description('图片数据格式（留空则跟随全局设置）'),
+        txt2imgPrompt: Schema.string().default('').description('文生图提示词模板。变量：{prompt}（留空则直接使用用户输入）'),
+        img2imgPrompt: Schema.string().default('').description('图生图提示词模板。变量：{url} {prompt}（留空则直接使用用户输入）'),
+        customHeaders: Schema.string().role('textarea').default('{}').description('自定义请求头 JSON 对象，会合并到默认请求头中（如 {"X-Custom-Header":"value"}）'),
+        bodyTemplate: Schema.string().role('textarea').default('').description('自定义请求体 JSON 模板（高级选项，留空使用内置格式）。\n支持变量：{model}、{prompt}、{size}，占位符：{{image_urls}}、{{image_objects}}'),
       })
-    ).default([]).description('自定义 API 配置列表（仅当上方“使用自定义 API 配置”开启时生效）'),
-  }).description('自定义 API 配置（高级）'),
-
-  Schema.object({
-    command: Schema.string().default('draw').description('文生图触发指令'),
-    aliases: Schema.array(String).default([]).description('文生图指令的额外别名'),
-    img2imgCommand: Schema.string().default('imgdraw').description('图生图触发指令'),
-    img2imgAliases: Schema.array(String).default([]).description('图生图指令的额外别名'),
-    redrawCommand: Schema.string().default('redraw').description('重绘指令'),
-    redrawAliases: Schema.array(String).default(['rd', '重绘']).description('重绘指令别名'),
-  }).description('指令设置'),
+    ).default([]).description('API 配置列表（为空时使用内置 OpenAI 默认配置）'),
+  }).description('API 配置'),
 
   Schema.object({
     blacklistAdmins: Schema.array(String).default([]).description('黑名单管理员的 QQ 号列表'),
@@ -103,35 +87,35 @@ export const Config = Schema.intersect([
 
   Schema.object({
     messages: Schema.object({
-      generating: Schema.string().default('生成中...'),
-      waitImage: Schema.string().default('请在{time}秒内发送需要编辑的图片'),
-      timeout: Schema.string().default('等待图片超时，已取消'),
-      empty: Schema.string().default('[提示] 请输入提示词'),
-      noApi: Schema.string().default('[提示] 未配置可用API'),
-      fail: Schema.string().default('[提示] 生成失败'),
-      modelTextOnly: Schema.string().default('[提示] 模型未生成图片，返回文字：{text}'),
-      needAssets: Schema.string().default('[提示] 图生图需要正确配置 assets 服务（selfUrl 未正确设置或服务未启动）'),
-      txt2imgDisabled: Schema.string().default('[提示] 文生图功能未启用'),
-      img2imgDisabled: Schema.string().default('[提示] 图生图功能未启用'),
-      rateLimit: Schema.string().default('[提示] 调用次数已达上限，请稍后再试'),
-      alreadyWaiting: Schema.string().default('你已在等待发送图片，请直接发送图片或等待超时'),
-      multiImageReceived: Schema.string().default('已收到 {count} 张图片，可继续发送或输入“完成”开始生成'),
-      multiImageLimit: Schema.string().default('已达到最大图片数量，自动开始生成'),
-      noImageReceived: Schema.string().default('未发送任何图片'),
-      blacklisted: Schema.string().default('[提示] 你已被加入黑名单，无法使用绘图功能'),
-      noPermission: Schema.string().default('[提示] 你没有权限管理黑名单'),
-      blacklistAddSuccess: Schema.string().default('已将 {targets} 加入黑名单'),
-      blacklistRemoveSuccess: Schema.string().default('已将 {targets} 移出黑名单'),
-      blacklistAddFail: Schema.string().default('{targets} 已在黑名单中或无效'),
-      blacklistRemoveFail: Schema.string().default('{targets} 不在黑名单中'),
-      invalidUserId: Schema.string().default('无效的QQ号：{targets}'),
-      blacklistListEmpty: Schema.string().default('当前黑名单为空'),
-      blacklistListTitle: Schema.string().default('当前黑名单：'),
-      waitCancel: Schema.string().default('已取消等待，可以重新开始'),
-      waitHelp: Schema.string().default('发送图片继续，或输入“完成”开始生成，输入“取消”取消'),
-      noLastTask: Schema.string().default('没有上一次生成记录，无法重绘'),
-      redrawing: Schema.string().default('正在重绘...'),
-      redrawImg2Img: Schema.string().default('[提示] 重绘仅支持文生图任务，图生图任务请直接发起新的图生图指令'),
+      generating: Schema.string().default('生成中...').description('开始生成图片时的提示'),
+      waitImage: Schema.string().default('请在{time}秒内发送需要编辑的图片').description('等待用户上传图片的提示'),
+      timeout: Schema.string().default('等待图片超时，已取消').description('等待图片超时取消的提示'),
+      empty: Schema.string().default('[提示] 请输入提示词').description('未输入提示词时的提示'),
+      noApi: Schema.string().default('[提示] 未配置可用API').description('无可用 API 时的提示'),
+      fail: Schema.string().default('[提示] 生成失败').description('图片生成失败时的提示'),
+      modelTextOnly: Schema.string().default('[提示] 模型未生成图片，返回文字：{text}').description('模型仅返回文字时的提示'),
+      needAssets: Schema.string().default('[提示] 图生图需要正确配置 assets 服务（selfUrl 未正确设置或服务未启动）').description('缺少 assets 服务时的提示'),
+      txt2imgDisabled: Schema.string().default('[提示] 文生图功能未启用').description('文生图被禁用时的提示'),
+      img2imgDisabled: Schema.string().default('[提示] 图生图功能未启用').description('图生图被禁用时的提示'),
+      rateLimit: Schema.string().default('[提示] 调用次数已达上限，请稍后再试').description('触发频率限制时的提示'),
+      alreadyWaiting: Schema.string().default('你已在等待发送图片，请直接发送图片或等待超时').description('用户已在等待状态时的提示'),
+      multiImageReceived: Schema.string().default('已收到 {count} 张图片，可继续发送或输入"完成"开始生成').description('收到多张图片时的累计提示'),
+      multiImageLimit: Schema.string().default('已达到最大图片数量，自动开始生成').description('达到最大图片数量自动触发的提示'),
+      noImageReceived: Schema.string().default('未发送任何图片').description('未收到任何图片时的提示'),
+      blacklisted: Schema.string().default('[提示] 你已被加入黑名单，无法使用绘图功能').description('黑名单用户被拦截时的提示'),
+      noPermission: Schema.string().default('[提示] 你没有权限管理黑名单').description('无黑名单管理权限时的提示'),
+      blacklistAddSuccess: Schema.string().default('已将 {targets} 加入黑名单').description('黑名单添加成功的提示'),
+      blacklistRemoveSuccess: Schema.string().default('已将 {targets} 移出黑名单').description('黑名单移除成功的提示'),
+      blacklistAddFail: Schema.string().default('{targets} 已在黑名单中或无效').description('黑名单添加失败的提示'),
+      blacklistRemoveFail: Schema.string().default('{targets} 不在黑名单中').description('黑名单移除失败的提示'),
+      invalidUserId: Schema.string().default('无效的QQ号：{targets}').description('无效 QQ 号的提示'),
+      blacklistListEmpty: Schema.string().default('当前黑名单为空').description('黑名单为空时的提示'),
+      blacklistListTitle: Schema.string().default('当前黑名单：').description('黑名单列表标题'),
+      waitCancel: Schema.string().default('已取消等待，可以重新开始').description('取消等待状态的提示'),
+      waitHelp: Schema.string().default('发送图片继续，或输入"完成"开始生成，输入"取消"取消').description('等待状态下的帮助提示'),
+      noLastTask: Schema.string().default('没有上一次生成记录，无法重绘').description('无重绘历史时的提示'),
+      redrawing: Schema.string().default('正在重绘...').description('重绘开始时的提示'),
+      redrawImg2Img: Schema.string().default('[提示] 重绘仅支持文生图任务，图生图任务请直接发起新的图生图指令').description('图生图任务无法重绘时的提示'),
       noContent: Schema.string().default('（未返回任何内容）').description('API 返回空结果时的追加提示'),
       templateError: Schema.string().default('（模板配置错误）').description('请求体模板解析失败时的追加提示'),
     }).description('所有提示文案的自定义配置，支持模板变量'),
@@ -171,6 +155,12 @@ interface ParsedApi {
   responseImageUrlsPath: string
   method: string
   adapterType: 'chat' | 'flat'
+  responseImageFormat: string
+  imageSize: string
+  txt2imgPrompt: string
+  img2imgPrompt: string
+  model: string
+  img2imgModel: string
 }
 
 export async function apply(ctx: any, cfg: Infer<typeof Config>) {
@@ -219,14 +209,14 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     apiCallTimestamps.push(Date.now())
   }
 
-  const BUILTIN_TXT2IMG_BODY = {
+  const BUILTIN_CHAT_TXT2IMG = {
     model: '{model}',
     messages: [
       { role: 'user', content: '{prompt}' }
     ]
   }
 
-  const BUILTIN_IMG2IMG_BODY = {
+  const BUILTIN_CHAT_IMG2IMG = {
     model: '{model}',
     messages: [{
       role: 'user',
@@ -237,78 +227,117 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     }]
   }
 
-  function buildBuiltinApi(): ParsedApi {
+  const BUILTIN_FLAT_TXT2IMG = {
+    model: '{model}',
+    prompt: '{prompt}',
+    size: '{size}'
+  }
+
+  const BUILTIN_FLAT_IMG2IMG = {
+    model: '{model}',
+    prompt: '{prompt}',
+    size: '{size}',
+    image_urls: '{{image_urls}}'
+  }
+
+  function parseApiEntry(entry: typeof cfg.apiList[number]): ParsedApi | null {
+    if (!entry.endpoint) return null
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json'
+    }
+    if (entry.apiKey) {
+      headers['Authorization'] = `Bearer ${entry.apiKey}`
+    }
+    // 合并自定义请求头
+    if (entry.customHeaders) {
+      try {
+        const custom = JSON.parse(entry.customHeaders)
+        if (custom && typeof custom === 'object') {
+          Object.assign(headers, custom)
+        }
+      } catch {
+        logger.warn('customHeaders JSON 解析失败，已忽略')
+      }
+    }
+    const adapterType = entry.adapterType || 'chat'
+
+    let txt2imgBody: any
+    let img2imgBody: any
+    let responseImagePath: string
+
+    if (entry.bodyTemplate) {
+      try {
+        const tmpl = JSON.parse(entry.bodyTemplate)
+        txt2imgBody = tmpl.txt2imgBody || tmpl
+        img2imgBody = tmpl.img2imgBody || tmpl
+        responseImagePath = tmpl.responseImagePath || 'choices.0.message.content'
+      } catch {
+        logger.warn('bodyTemplate JSON 解析失败，使用内置模板')
+        return null
+      }
+    } else if (adapterType === 'flat') {
+      txt2imgBody = BUILTIN_FLAT_TXT2IMG
+      img2imgBody = BUILTIN_FLAT_IMG2IMG
+      responseImagePath = 'data.0.url'
+    } else {
+      txt2imgBody = BUILTIN_CHAT_TXT2IMG
+      img2imgBody = BUILTIN_CHAT_IMG2IMG
+      responseImagePath = 'choices.0.message.content'
+    }
+
     return {
-      endpoint: cfg.apiEndpoint,
+      endpoint: entry.endpoint,
+      headers,
+      txt2imgBody,
+      img2imgBody,
+      responseImagePath,
+      responseImageUrlsPath: '',
+      method: 'POST',
+      adapterType,
+      responseImageFormat: entry.responseImageFormat || '',
+      imageSize: entry.imageSize || cfg.imageSize,
+      txt2imgPrompt: entry.txt2imgPrompt || '',
+      img2imgPrompt: entry.img2imgPrompt || '',
+      model: entry.model,
+      img2imgModel: entry.img2imgModel || '',
+    }
+  }
+
+  function buildDefaultApi(): ParsedApi {
+    return {
+      endpoint: 'https://api.openai.com/v1/chat/completions',
       headers: {
-        'Authorization': `Bearer ${cfg.apiKey}`,
+        'Authorization': 'Bearer ',
         'Content-Type': 'application/json'
       },
-      txt2imgBody: BUILTIN_TXT2IMG_BODY,
-      img2imgBody: BUILTIN_IMG2IMG_BODY,
+      txt2imgBody: BUILTIN_CHAT_TXT2IMG,
+      img2imgBody: BUILTIN_CHAT_IMG2IMG,
       responseImagePath: 'choices.0.message.content',
       responseImageUrlsPath: '',
       method: 'POST',
-      adapterType: 'chat'
+      adapterType: 'chat',
+      responseImageFormat: '',
+      imageSize: cfg.imageSize,
+      txt2imgPrompt: '',
+      img2imgPrompt: '',
+      model: 'gpt-image-2',
+      img2imgModel: '',
     }
-  }
-
-  function parseCustomApiExample(raw: string): ParsedApi | null {
-    try {
-      const obj = JSON.parse(raw)
-      if (!obj.endpoint) return null
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-      if (obj.headers && typeof obj.headers === 'object') {
-        for (const [k, v] of Object.entries(obj.headers)) {
-          if (typeof v === 'string') {
-            headers[k] = v.replace(/\{apiKey\}/g, obj.apiKey || '')
-          }
-        }
-      }
-      return {
-        endpoint: String(obj.endpoint),
-        headers,
-        txt2imgBody: typeof obj.txt2imgBody === 'object' ? obj.txt2imgBody : JSON.parse(obj.txt2imgBody || '{}'),
-        img2imgBody: typeof obj.img2imgBody === 'object' ? obj.img2imgBody : JSON.parse(obj.img2imgBody || '{}'),
-        responseImagePath: obj.responseImagePath || 'choices.0.message.content',
-        responseImageUrlsPath: obj.responseImageUrlsPath || '',
-        method: (obj.method || 'POST').toUpperCase(),
-        adapterType: (obj.adapterType === 'flat' ? 'flat' : 'chat') as 'chat' | 'flat',
-      }
-    } catch {
-      return null
-    }
-  }
-
-  let cachedCustomApis: ParsedApi[] | null = null
-  let cachedCustomApiListKey = ''
-
-  function getCustomApis(): ParsedApi[] {
-    if (!cfg.useCustomApi) return []
-    const key = cfg.customApiList.map(a => `${a.enable}|${a.example}`).join(',')
-    if (cachedCustomApis === null || cachedCustomApiListKey !== key) {
-      cachedCustomApis = cfg.customApiList
-        .filter(item => item.enable)
-        .map(item => parseCustomApiExample(item.example))
-        .filter((api): api is ParsedApi => api !== null)
-      cachedCustomApiListKey = key
-      apiRoundRobinIdx = 0
-    }
-    return cachedCustomApis
   }
 
   function getApi(): ParsedApi | null {
-    if (cfg.useCustomApi) {
-      const apis = getCustomApis()
-      if (apis.length === 0) return null
-      if (cfg.apiStrategy === 'sequence') return apis[0]
-      const api = apis[apiRoundRobinIdx % apis.length]
-      apiRoundRobinIdx++
-      return api
-    } else {
-      if (!cfg.apiKey) return null
-      return buildBuiltinApi()
+    const entries = cfg.apiList.filter((e: any) => e.enable)
+    if (entries.length === 0) {
+      return buildDefaultApi()
     }
+    const apis = entries
+      .map((e: any) => parseApiEntry(e))
+      .filter((a): a is ParsedApi => a !== null)
+    if (apis.length === 0) return null
+    if (cfg.apiStrategy === 'sequence') return apis[0]
+    const api = apis[apiRoundRobinIdx % apis.length]
+    apiRoundRobinIdx++
+    return api
   }
 
   function deepReplace(obj: any, placeholder: string, replacement: any): any {
@@ -490,7 +519,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       if (found) imageUrls = [found]
     }
 
-    const format = cfg.responseImageFormat || 'url'
+    const format = api.responseImageFormat || cfg.responseImageFormat || 'url'
     imageUrls = imageUrls.map(raw => imageDataToSegment(raw, format)).filter((url): url is string => url !== null)
 
     if (imageUrls.length > 0) {
@@ -623,12 +652,22 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     imageUrls: string[] = [],
     modelOverride?: string
   ) {
-    const model = modelOverride || cfg.txt2imgModel
-    const size = cfg.imageSize
     const isImg2Img = imageUrls.length > 0
+    const model = modelOverride || (isImg2Img ? (api.img2imgModel || api.model) : api.model)
+    const size = api.imageSize || cfg.imageSize
+
+    // 应用 API 层级的提示词模板
+    const promptTemplate = isImg2Img ? api.img2imgPrompt : api.txt2imgPrompt
+    let finalPrompt = prompt
+    if (promptTemplate && isImg2Img) {
+      finalPrompt = promptTemplate.replace('{prompt}', prompt).replace('{url}', imageUrls[0] || '')
+    } else if (promptTemplate) {
+      finalPrompt = promptTemplate.replace('{prompt}', prompt)
+    }
+
     const bodyTemplate = isImg2Img ? api.img2imgBody : api.txt2imgBody
 
-    const bodyVars: Record<string, any> = { model, prompt, size }
+    const bodyVars: Record<string, any> = { model, prompt: finalPrompt, size }
     if (isImg2Img && imageUrls.length > 0) {
       bodyVars['url'] = imageUrls[0]
       bodyVars['image_urls'] = imageUrls
@@ -647,9 +686,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       return
     }
 
-    const sensitive = cfg.useCustomApi
-      ? (api.headers?.Authorization?.split(' ')[1] || '')
-      : cfg.apiKey
+    const sensitive = api.headers?.Authorization?.split(' ')[1] || ''
 
     if (debug) {
       const safeBody = sanitizeForLog(body, sensitive)
@@ -669,6 +706,18 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
         method: api.method,
         headers: api.headers,
         timeout: cfg.timeout,
+      }
+      // 代理配置
+      if (cfg.proxyEnabled && cfg.proxyHost) {
+        const proxyAuth = cfg.proxyAuth && cfg.proxyUsername
+          ? { username: cfg.proxyUsername, password: cfg.proxyPassword }
+          : undefined
+        config.proxy = {
+          protocol: cfg.proxyProtocol,
+          host: cfg.proxyHost,
+          port: cfg.proxyPort,
+          auth: proxyAuth,
+        }
       }
       if (api.method === 'GET') {
         config.params = body
@@ -724,8 +773,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     return customGenerate(session, api, prompt, imageUrls, modelOverride)
   }
 
-  const cmd = ctx.command(`${cfg.command} <raw:text>`, 'draw')
-  cfg.aliases.forEach(alias => cmd.alias(alias))
+  const cmd = ctx.command('draw <raw:text>', '文生图')
   cmd.action(async ({ session }: any, raw: string) => {
     try {
       if (!session) return
@@ -735,9 +783,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       if (!prompt) return safeSend(session, cfg.messages.empty)
       if (prompt.length > 6000) return safeSend(session, '提示词过长，请限制在6000字符以内')
       await safeSend(session, cfg.messages.generating)
-      const finalPrompt = cfg.txt2imgPrompt.replace('{prompt}', prompt)
-      const model = cfg.txt2imgModel
-      await generate(session, finalPrompt, undefined, model)
+      await generate(session, prompt)
     } catch (e) {
       logger.error('文生图命令异常', e)
       await safeSend(session, cfg.messages.fail)
@@ -749,15 +795,14 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       waitingMap.delete(key)
       if (task.imageUrls.length > 0) {
         safeSend(session, cfg.messages.generating).catch(() => { })
-        generateWithMultipleImages(session, task.prompt, task.imageUrls, cfg.img2imgModel || cfg.txt2imgModel)
+        generateWithMultipleImages(session, task.prompt, task.imageUrls)
       } else {
         safeSend(session, cfg.messages.timeout).catch(() => { })
       }
     }, cfg.imgWaitTime * 1000)
   }
 
-  const imgCmd = ctx.command(`${cfg.img2imgCommand} <raw:text>`, 'imgdraw')
-  cfg.img2imgAliases.forEach(alias => imgCmd.alias(alias))
+  const imgCmd = ctx.command('imgdraw <raw:text>', '图生图')
   imgCmd.action(async ({ session }: any, raw: string) => {
     try {
       if (!session) return
@@ -777,10 +822,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       if (hasUrl) {
         const imageUrl = urlMatch![0]
         await safeSend(session, cfg.messages.generating)
-        const finalPrompt = cfg.img2imgPrompt
-          .replace('{url}', imageUrl)
-          .replace('{prompt}', promptText)
-        await generateWithMultipleImages(session, finalPrompt, [imageUrl], cfg.img2imgModel || cfg.txt2imgModel)
+        await generateWithMultipleImages(session, promptText, [imageUrl])
         return
       }
 
@@ -838,7 +880,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
           clearTimeout(task.timer)
           waitingMap.delete(key)
           await safeSend(session, cfg.messages.generating)
-          await generateWithMultipleImages(session, task.prompt, task.imageUrls, cfg.img2imgModel || cfg.txt2imgModel)
+          await generateWithMultipleImages(session, task.prompt, task.imageUrls)
           return
         }
 
@@ -854,7 +896,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
         waitingMap.delete(key)
         if (task.imageUrls.length > 0) {
           await safeSend(session, cfg.messages.generating)
-          await generateWithMultipleImages(session, task.prompt, task.imageUrls, cfg.img2imgModel || cfg.txt2imgModel)
+          await generateWithMultipleImages(session, task.prompt, task.imageUrls)
         } else {
           await safeSend(session, cfg.messages.noImageReceived)
         }
@@ -877,8 +919,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     }
   })
 
-  const redrawCmd = ctx.command(`${cfg.redrawCommand}`, 'redraw')
-  cfg.redrawAliases.forEach(alias => redrawCmd.alias(alias))
+  const redrawCmd = ctx.command('redraw', '重绘')
   redrawCmd.action(async ({ session }: any) => {
     try {
       if (!session) return

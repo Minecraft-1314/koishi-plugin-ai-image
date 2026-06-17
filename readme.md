@@ -47,53 +47,54 @@ Image‑to‑image supports **multiple reference images** with configurable maxi
 |--------|------|--------|
 | **基本设置** | | |
 | `debug` | 调试模式，输出完整请求/响应日志 | `false` |
-| `apiStrategy` | API 调度策略：`sequence`（顺序）/ `roundrobin`（轮询负载均衡） | `roundrobin` |
 | `timeout` | API 请求超时时间（毫秒） | `300000` |
 | `rateLimit` | 每小时调用次数上限 | `200` |
 | `imgWaitTime` | 图生图等待用户上传图片的超时秒数 | `60` |
-| `model` | 通用模型名称，文生图/图生图共用 | `gpt-image-2` |
-| `txt2imgModel` | 文生图专用模型，留空则使用通用模型 | (空) |
-| `img2imgModel` | 图生图专用模型，留空则使用通用模型 | (空) |
-| `imageSize` | 默认图片尺寸（宽x高） | `1024x1024` |
+| `imageSize` | 全局默认图片尺寸（宽x高），可被 API 条目覆盖 | `1024x1024` |
 | `maxImages` | 图生图最大支持图片数量 | `5` |
 | `imageSendMode` | 图片发送方式：`image`（仅图片）、`url`（仅链接）、`both`（图片+链接） | `image` |
 | `enableForward` | 多图结果是否使用合并转发 | `true` |
 | `enableTxt2Img` | 启用文生图功能 | `true` |
 | `enableImg2Img` | 启用图生图功能 | `true` |
-| `responseImageFormat` | 图片数据格式：`url`（直链）、`pure_base64`（纯 Base64）、`data_uri`（Data URI） | `url` |
-| **API 配置** | 每个条目是一个完整的请求范式 JSON | `[]` |
+| `responseImageFormat` | 全局默认图片数据格式：`url` / `pure_base64` / `data_uri` | `url` |
+| **代理设置** | | |
+| `proxyEnabled` | 是否启用 HTTP/HTTPS 代理 | `false` |
+| `proxyProtocol` | 代理协议：`http` / `https` | `http` |
+| `proxyHost` | 代理地址 | (空) |
+| `proxyPort` | 代理端口 | `8080` |
+| `proxyAuth` | 代理是否需要认证 | `false` |
+| `proxyUsername` | 代理用户名 | (空) |
+| `proxyPassword` | 代理密码 | (空) |
+| **API 配置** | 每个条目独立配置，支持多 API 负载均衡 | `[]` |
 | `apiList[].enable` | 是否启用此 API | `true` |
-| `apiList[].example` | **（大文本框）** 请求范式 JSON，详见下方说明 | 见默认示例 |
-| **指令设置** | | |
-| `command` | 文生图触发指令 | `draw` |
-| `aliases` | 文生图指令别名 | `[]` |
-| `img2imgCommand` | 图生图触发指令 | `imgdraw` |
-| `img2imgAliases` | 图生图指令别名 | `[]` |
-| `redrawCommand` | 重绘触发指令 | `redraw` |
-| `redrawAliases` | 重绘指令别名 | `['rd', '重绘']` |
-| **提示词模板** | | |
-| `txt2imgPrompt` | 文生图提示模板，变量 `{prompt}` | 见默认 |
-| `img2imgPrompt` | 图生图提示模板，变量 `{url}` `{prompt}` | 见默认 |
+| `apiList[].adapterType` | 接口类型：`chat`（OpenAI 消息格式）/ `flat`（扁平格式） | `chat` |
+| `apiList[].endpoint` | API 端点地址 | `https://api.openai.com/v1/chat/completions` |
+| `apiList[].apiKey` | API 密钥 | (空) |
+| `apiList[].model` | 模型名称 | `gpt-image-2` |
+| `apiList[].img2imgModel` | 图生图专用模型（留空使用上方模型） | (空) |
+| `apiList[].imageSize` | 图片尺寸（留空使用全局默认） | (空) |
+| `apiList[].responseImageFormat` | 图片数据格式（留空跟随全局） | (空) |
+| `apiList[].txt2imgPrompt` | 文生图提示词模板（留空直接使用用户输入） | (空) |
+| `apiList[].img2imgPrompt` | 图生图提示词模板（留空直接使用用户输入） | (空) |
+| `apiList[].customHeaders` | 自定义请求头 JSON 对象，合并到默认请求头中 | `{}` |
+| `apiList[].bodyTemplate` | 自定义请求体 JSON 模板（高级，留空使用内置格式） | (空) |
+| `apiStrategy` | API 调度策略：`sequence`（顺序）/ `roundrobin`（轮询负载均衡） | `roundrobin` |
 | **权限管理** | | |
 | `blacklistAdmins` | 黑名单管理员 QQ 号列表 | `[]` |
 | **消息文本** | 所有提示文案均可自定义，支持模板变量 | 见配置页 |
 
-#### 请求范式 JSON (`example` 字段)
+> 指令名称（`draw`、`imgdraw`、`redraw`、`blacklist`）为固定注册名，可在 Koishi 的指令管理页面中单独配置别名。
 
-这是一个 **完整的 JSON 对象**，插件会解析它来构造实际请求。支持以下字段（除 `endpoint` 外均为可选）：
+#### 请求范式 JSON (`bodyTemplate` 字段)
+
+`bodyTemplate` 是高级选项，用于完全自定义请求体。留空时插件根据 `adapterType` 自动使用内置模板。
 
 | 字段 | 说明 | 默认值 |
 |------|------|--------|
-| `endpoint` | **必填**，API 端点 URL，支持变量 `{model}` | - |
-| `apiKey` | API 密钥，如果省略则不从配置读取 | - |
-| `headers` | 请求头 JSON 对象，支持变量 `{apiKey}` | `{"Authorization":"Bearer {apiKey}","Content-Type":"application/json"}` |
-| `txt2imgBody` | 文生图请求体 JSON 模板，支持变量 `{model}` `{prompt}` `{size}` | `{"model":"{model}","prompt":"{prompt}","size":"{size}"}` |
-| `img2imgBody` | 图生图请求体 JSON 模板，支持变量 `{model}` `{prompt}` `{size}` `{{image_urls}}` `{{image_objects}}` | 见默认 |
-| `responseImagePath` | 响应 JSON 中图片数据的字段路径，如 `data.0.url` 或 `data.0.b64_json` | `data.0.url` |
-| `responseImageFormat` | 图片格式：`url`（HTTP链接）、`pure_base64`（纯Base64）、`data_uri`（data:image/png;base64,...） | `url` |
-| `adapterType` | 接口类型：`chat`（OpenAI 消息格式，默认）/ `flat`（原生绘图扁平格式） | `chat` |
-| `extraBody` | 额外 JSON 字段，会深度合并到请求体中 | 空 |
-| `method` | HTTP 方法，默认 POST | `POST` |
+| `txt2imgBody` | 文生图请求体 JSON 模板，支持变量 `{model}` `{prompt}` `{size}` | 内置 |
+| `img2imgBody` | 图生图请求体 JSON 模板，支持变量 `{model}` `{prompt}` `{size}` `{{image_urls}}` `{{image_objects}}` | 内置 |
+| `responseImagePath` | 响应 JSON 中图片数据的字段路径，如 `data.0.url` | 由 adapterType 决定 |
+| `method` | HTTP 方法 | `POST` |
 
 **变量说明**  
 - `{model}`：模型名称（取自配置中的全局模型或专用模型）  
@@ -124,53 +125,54 @@ Image‑to‑image supports **multiple reference images** with configurable maxi
 |-------------|-------------|---------|
 | **Basic** | | |
 | `debug` | Debug mode, logs full request/response | `false` |
-| `apiStrategy` | API strategy: `sequence` / `roundrobin` | `roundrobin` |
 | `timeout` | Request timeout (ms) | `300000` |
 | `rateLimit` | Hourly call limit | `200` |
 | `imgWaitTime` | Image upload wait timeout (seconds) | `60` |
-| `model` | General model name | `gpt-image-2` |
-| `txt2imgModel` | Text-to-image model override | (empty) |
-| `img2imgModel` | Image-to-image model override | (empty) |
-| `imageSize` | Default image size (WxH) | `1024x1024` |
+| `imageSize` | Global default image size (WxH), overridable per API | `1024x1024` |
 | `maxImages` | Max reference images | `5` |
 | `imageSendMode` | Image send mode: `image`, `url`, `both` | `image` |
 | `enableForward` | Use forward message for multiple images | `true` |
 | `enableTxt2Img` | Enable txt2img | `true` |
 | `enableImg2Img` | Enable img2img | `true` |
-| `responseImageFormat` | Image data format: `url`, `pure_base64`, `data_uri` | `url` |
-| **API Config** | Each entry is a complete request template JSON | `[]` |
+| `responseImageFormat` | Global default image data format: `url` / `pure_base64` / `data_uri` | `url` |
+| **Proxy** | | |
+| `proxyEnabled` | Enable HTTP/HTTPS proxy | `false` |
+| `proxyProtocol` | Proxy protocol: `http` / `https` | `http` |
+| `proxyHost` | Proxy host | (empty) |
+| `proxyPort` | Proxy port | `8080` |
+| `proxyAuth` | Proxy requires authentication | `false` |
+| `proxyUsername` | Proxy username | (empty) |
+| `proxyPassword` | Proxy password | (empty) |
+| **API Config** | Each entry independently configurable, supports multi-API load balancing | `[]` |
 | `apiList[].enable` | Enable this API | `true` |
-| `apiList[].example` | **(Textarea)** Request template JSON, see details below | default example |
-| **Commands** | | |
-| `command` | Txt2img command | `draw` |
-| `aliases` | Command aliases | `[]` |
-| `img2imgCommand` | Img2img command | `imgdraw` |
-| `img2imgAliases` | Command aliases | `[]` |
-| `redrawCommand` | Redraw command | `redraw` |
-| `redrawAliases` | Redraw aliases | `['rd', '重绘']` |
-| **Prompts** | | |
-| `txt2imgPrompt` | Prompt template, var `{prompt}` | Chinese default |
-| `img2imgPrompt` | Prompt template, vars `{url}` `{prompt}` | Chinese default |
+| `apiList[].adapterType` | Adapter type: `chat` (OpenAI format) / `flat` (flat format) | `chat` |
+| `apiList[].endpoint` | API endpoint URL | `https://api.openai.com/v1/chat/completions` |
+| `apiList[].apiKey` | API key | (empty) |
+| `apiList[].model` | Model name | `gpt-image-2` |
+| `apiList[].img2imgModel` | Image-to-image model (falls back to model) | (empty) |
+| `apiList[].imageSize` | Image size (falls back to global) | (empty) |
+| `apiList[].responseImageFormat` | Image data format (falls back to global) | (empty) |
+| `apiList[].txt2imgPrompt` | Prompt template (empty = raw user input) | (empty) |
+| `apiList[].img2imgPrompt` | Prompt template (empty = raw user input) | (empty) |
+| `apiList[].customHeaders` | Custom headers JSON object, merged into default headers | `{}` |
+| `apiList[].bodyTemplate` | Custom request body JSON template (advanced, empty = built-in) | (empty) |
+| `apiStrategy` | API strategy: `sequence` / `roundrobin` | `roundrobin` |
 | **Permissions** | | |
 | `blacklistAdmins` | Admin QQ number list | `[]` |
 | **Messages** | All messages customizable with template vars | see schema |
 
-#### Request Template JSON (`example` field)
+> Command names (`draw`, `imgdraw`, `redraw`, `blacklist`) are fixed; aliases can be configured via Koishi's command management page.
 
-This is a **complete JSON object** that defines how to call the API. Supported fields (only `endpoint` is mandatory):
+#### Request Template JSON (`bodyTemplate` field)
+
+`bodyTemplate` is the advanced option for full custom request bodies. Leave empty to use built-in templates based on `adapterType`.
 
 | Field | Description | Default |
 |-------|-------------|---------|
-| `endpoint` | **Required** API endpoint URL, supports `{model}` variable | - |
-| `apiKey` | API key, optional | - |
-| `headers` | Headers JSON object, supports `{apiKey}` | `{"Authorization":"Bearer {apiKey}","Content-Type":"application/json"}` |
-| `txt2imgBody` | Txt2img request body template, vars `{model}` `{prompt}` `{size}` | `{"model":"{model}","prompt":"{prompt}","size":"{size}"}` |
-| `img2imgBody` | Img2img request body template, vars `{model}` `{prompt}` `{size}` `{{image_urls}}` `{{image_objects}}` | depends on API |
-| `responseImagePath` | JSON path to image data in response, e.g. `data.0.url` | `data.0.url` |
-| `responseImageFormat` | Image format: `url` (HTTP link), `pure_base64` (pure Base64), `data_uri` (data:image/png;base64,...) | `url` |
-| `adapterType` | Adapter type: `chat` (OpenAI message format, default) / `flat` (flat native draw format) | `chat` |
-| `extraBody` | Extra JSON fields deep-merged into the final body | empty |
-| `method` | HTTP method, default POST | `POST` |
+| `txt2imgBody` | Txt2img request body template, vars `{model}` `{prompt}` `{size}` | built-in |
+| `img2imgBody` | Img2img request body template, vars `{model}` `{prompt}` `{size}` `{{image_urls}}` `{{image_objects}}` | built-in |
+| `responseImagePath` | JSON path to image data, e.g. `data.0.url` | by adapterType |
+| `method` | HTTP method | `POST` |
 
 **Variable placeholders**  
 - `{model}` — Model name (from global or per-mode config)  
