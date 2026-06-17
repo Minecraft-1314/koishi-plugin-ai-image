@@ -192,6 +192,7 @@ This is a **complete JSON object** that defines how to call the API. Supported f
   "responseImagePath": "data.0.url",
   "responseImageFormat": "url"
 }
+```
 
 ### OpenAI Chat Completions（图片对象列表）
 ```json
@@ -224,8 +225,9 @@ This is a **complete JSON object** that defines how to call the API. Supported f
 ## 项目贡献者 (Contributors)
 | 贡献者 (Contributor) | 贡献内容 (Contribution) |
 | --- | --- |
-| Minecraft-1314 | 插件完整开发 (Complete plugin development) |
-| （欢迎提交 PR 加入贡献者列表） | （Welcome to submit PR to join the contributor list） |
+| Minecraft-1314 | 插件完整开发 |
+| Stalker-404 | 插件功能建议-base64格式传递参考图片-已添加 |
+| （欢迎提交 PR / Issues 加入贡献者列表） |
 
 ## 许可协议 (License)
 本项目采用 MIT 许可证，详情参见 LICENSE 文件。
