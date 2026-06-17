@@ -59,6 +59,7 @@ export const Config = Schema.intersect([
           .role('textarea')
           .default(JSON.stringify({
             endpoint: 'https://api.openai.com/v1/chat/completions',
+            adapterType: 'chat',
             apiKey: 'sk-xxxx',
             headers: {
               'Authorization': 'Bearer {apiKey}',
@@ -82,7 +83,7 @@ export const Config = Schema.intersect([
             },
             responseImagePath: 'choices.0.message.content'
           }, null, 2))
-          .description('完整的 API 请求范式 JSON。\n支持变量：{model}、{prompt}、{size}、{apiKey}，以及数组占位符 {{image_urls}}、{{image_objects}}。\n注意：{{image_objects}} 在 JSON 中必须作为字符串值填写，插件会自动转换为对象数组。'),
+          .description('完整的 API 请求范式 JSON。\n支持变量：{model}、{prompt}、{size}、{apiKey}，以及数组占位符 {{image_urls}}、{{image_objects}}。\nadapterType：chat（OpenAI 消息格式，默认）/ flat（原生绘图扁平格式）。\n注意：{{image_objects}} 在 JSON 中必须作为字符串值填写，插件会自动转换为对象数组。'),
       })
     ).default([]).description('自定义 API 配置列表（仅当上方“使用自定义 API 配置”开启时生效）'),
   }).description('自定义 API 配置（高级）'),
@@ -169,6 +170,7 @@ interface ParsedApi {
   responseImagePath: string
   responseImageUrlsPath: string
   method: string
+  adapterType: 'chat' | 'flat'
 }
 
 export async function apply(ctx: any, cfg: Infer<typeof Config>) {
@@ -246,7 +248,8 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       img2imgBody: BUILTIN_IMG2IMG_BODY,
       responseImagePath: 'choices.0.message.content',
       responseImageUrlsPath: '',
-      method: 'POST'
+      method: 'POST',
+      adapterType: 'chat'
     }
   }
 
@@ -270,6 +273,7 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
         responseImagePath: obj.responseImagePath || 'choices.0.message.content',
         responseImageUrlsPath: obj.responseImageUrlsPath || '',
         method: (obj.method || 'POST').toUpperCase(),
+        adapterType: (obj.adapterType === 'flat' ? 'flat' : 'chat') as 'chat' | 'flat',
       }
     } catch {
       return null
@@ -388,6 +392,26 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
     return []
   }
 
+  function findFirstUrlInJson(obj: any): string | null {
+    if (!obj) return null
+    if (typeof obj === 'string') {
+      const trimmed = obj.trim()
+      return /^https?:\/\//.test(trimmed) ? trimmed : null
+    }
+    if (Array.isArray(obj)) {
+      for (const item of obj) {
+        const found = findFirstUrlInJson(item)
+        if (found) return found
+      }
+    } else if (typeof obj === 'object') {
+      for (const key of Object.keys(obj)) {
+        const found = findFirstUrlInJson(obj[key])
+        if (found) return found
+      }
+    }
+    return null
+  }
+
   function imageDataToSegment(raw: string, format: string): string | null {
     const str = raw.trim()
     if (!str) return null
@@ -460,6 +484,12 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       imageUrls = extractImagesByPath(responseData, api.responseImagePath)
     }
 
+    // 兜底扫描: 从 JSON 响应中查找第一个 HTTP/HTTPS URL
+    if (imageUrls.length === 0) {
+      const found = findFirstUrlInJson(responseData)
+      if (found) imageUrls = [found]
+    }
+
     const format = cfg.responseImageFormat || 'url'
     imageUrls = imageUrls.map(raw => imageDataToSegment(raw, format)).filter((url): url is string => url !== null)
 
@@ -468,13 +498,16 @@ export async function apply(ctx: any, cfg: Infer<typeof Config>) {
       return
     }
 
-    const textContent = getValueByPath(responseData, 'choices.0.message.content')
-    if (typeof textContent === 'string' && textContent.trim().length > 0) {
-      const msg = cfg.messages.modelTextOnly.replace('{text}', textContent.trim().slice(0, 500))
-      await safeSend(session, msg)
-    } else {
-      await safeSend(session, cfg.messages.fail + cfg.messages.noContent)
+    // chat 模式特有: 尝试从 choices.0.message.content 提取文本
+    if (api.adapterType === 'chat') {
+      const textContent = getValueByPath(responseData, 'choices.0.message.content')
+      if (typeof textContent === 'string' && textContent.trim().length > 0) {
+        const msg = cfg.messages.modelTextOnly.replace('{text}', textContent.trim().slice(0, 500))
+        await safeSend(session, msg)
+        return
+      }
     }
+    await safeSend(session, cfg.messages.fail + cfg.messages.noContent)
   }
 
   function validateEndpointUrl(url: string): boolean {

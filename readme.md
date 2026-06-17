@@ -91,6 +91,7 @@ Image‑to‑image supports **multiple reference images** with configurable maxi
 | `img2imgBody` | 图生图请求体 JSON 模板，支持变量 `{model}` `{prompt}` `{size}` `{{image_urls}}` `{{image_objects}}` | 见默认 |
 | `responseImagePath` | 响应 JSON 中图片数据的字段路径，如 `data.0.url` 或 `data.0.b64_json` | `data.0.url` |
 | `responseImageFormat` | 图片格式：`url`（HTTP链接）、`pure_base64`（纯Base64）、`data_uri`（data:image/png;base64,...） | `url` |
+| `adapterType` | 接口类型：`chat`（OpenAI 消息格式，默认）/ `flat`（原生绘图扁平格式） | `chat` |
 | `extraBody` | 额外 JSON 字段，会深度合并到请求体中 | 空 |
 | `method` | HTTP 方法，默认 POST | `POST` |
 
@@ -102,6 +103,13 @@ Image‑to‑image supports **multiple reference images** with configurable maxi
 - `{{image_objects}}`：图生图时生成 **Chat Completions 风格图片对象列表**，适用于 OpenAI Chat API  
 - `{url}`：图生图时第一张图片的链接（字符串）  
 - `{apiKey}`：API 密钥，仅用于 `headers` 字段  
+
+**`adapterType` 说明**  
+- `chat`（默认）：OpenAI 消息格式，请求体使用 `messages` 数组  
+- `flat`：原生绘图扁平格式，请求体直接平铺字段（不含 `messages` 包装）
+
+**图片 URL 自动扫描**  
+所有模式下，当 `responseImagePath` 未命中时，插件会自动扫描响应 JSON 中**第一个 HTTP/HTTPS URL** 作为图片地址——无需为不同平台精确配置图片路径。  
 
 **Base64 / Data URI 处理说明**  
 - 当 `responseImageFormat` 设为 `pure_base64` 时，插件会从 `responseImagePath` 取出纯 Base64 字符串，自动添加 `data:image/png;base64,` 前缀后发送。  
@@ -160,6 +168,7 @@ This is a **complete JSON object** that defines how to call the API. Supported f
 | `img2imgBody` | Img2img request body template, vars `{model}` `{prompt}` `{size}` `{{image_urls}}` `{{image_objects}}` | depends on API |
 | `responseImagePath` | JSON path to image data in response, e.g. `data.0.url` | `data.0.url` |
 | `responseImageFormat` | Image format: `url` (HTTP link), `pure_base64` (pure Base64), `data_uri` (data:image/png;base64,...) | `url` |
+| `adapterType` | Adapter type: `chat` (OpenAI message format, default) / `flat` (flat native draw format) | `chat` |
 | `extraBody` | Extra JSON fields deep-merged into the final body | empty |
 | `method` | HTTP method, default POST | `POST` |
 
@@ -171,6 +180,13 @@ This is a **complete JSON object** that defines how to call the API. Supported f
 - `{{image_objects}}` — Chat Completions image object list for OpenAI Chat API  
 - `{url}` — First image URL (string) for img2img  
 - `{apiKey}` — API key, used only in `headers`
+
+**`adapterType`**  
+- `chat` (default): OpenAI message format — request body uses `messages` array  
+- `flat`: Flat native draw format — request body fields are plain (no `messages` wrapper)
+
+**Auto URL scanning**  
+In all modes, when `responseImagePath` yields no match, the plugin auto-scans the response JSON for the **first HTTP/HTTPS URL** as the image address — no need to configure exact paths per platform.
 
 **Base64 / Data URI**  
 - `pure_base64`: takes raw Base64 from the specified path, prepends `data:image/png;base64,` before sending.  
